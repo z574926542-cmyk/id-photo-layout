@@ -31,11 +31,12 @@ CANVAS_7INCH   = (2100, 1500)   # 7×5 英寸横版（混排用）
 
 # 证件照尺寸（厘米）→ 像素（宽×高）
 PHOTO_SIZES = {
-    "1inch":  (cm_to_px(2.5), cm_to_px(3.5)),   # 一寸：295×413
-    "2inch":  (cm_to_px(3.5), cm_to_px(5.0)),   # 二寸：413×591
-    "small2": (cm_to_px(3.3), cm_to_px(4.5)),   # 小二寸：390×531
-    "3inch":  (cm_to_px(9.0), cm_to_px(6.0)),   # 三寸横排：1063×709
-    "driver": (cm_to_px(2.2), cm_to_px(3.2)),   # 驾驶证：260×378
+    "1inch":    (cm_to_px(2.5), cm_to_px(3.5)),   # 一寸：295×413
+    "2inch":    (cm_to_px(3.5), cm_to_px(5.0)),   # 二寸：413×591
+    "small2":  (cm_to_px(3.3), cm_to_px(4.5)),   # 小二寸：390×531
+    "3inch":   (cm_to_px(9.0), cm_to_px(6.0)),   # 三寸横排：1063×709
+    "driver":  (cm_to_px(2.2), cm_to_px(3.2)),   # 驾驶证：260×378
+    "wedding": (cm_to_px(5.0), cm_to_px(3.5)),   # 结婚照横版二寸：591×413
 }
 
 # 照片间距（px）
@@ -53,6 +54,7 @@ TEMPLATES = {
     "三寸排版":      "3inch_layout",
     "驾驶证排版":    "driver_layout",
     "一寸+二寸排版": "mixed_layout",
+    "结婚照排版":    "wedding_layout",
 }
 
 TEMPLATE_DESC = {
@@ -62,6 +64,7 @@ TEMPLATE_DESC = {
     "三寸排版":      "1×2 共2张 · 5寸竖版",
     "驾驶证排版":    "5×2 共10张 · 5寸横版",
     "一寸+二寸排版": "一寸×9 + 二寸×4 · 7寸横版",
+    "结婚照排版":    "2×2 共4张 · 5寸横版",
 }
 
 # ─────────────────────────────────────────────
@@ -164,6 +167,9 @@ def generate_layout(img: Image.Image, template_name: str) -> Image.Image:
 
     if template_name == "一寸+二寸排版":
         return _layout_mixed(img)
+
+    if template_name == "结婚照排版":
+        return _layout_wedding(img)
 
     raise ValueError(f"未处理的排版类型：{template_name}")
 
@@ -287,6 +293,28 @@ def _layout_mixed(img: Image.Image) -> Image.Image:
             p = add_border(p)
             canvas.paste(p, (x, y))
 
+    return canvas
+
+
+def _layout_wedding(img: Image.Image) -> Image.Image:
+    """
+    结婚照排版：
+    - 画布：5寸横版（1500×1050 px，5英寸宽×3.5英寸高）
+    - 单张：横版二寸（5cm×3.5cm → 591×413 px）
+    - 排列：2列×2行，共4张，整体居中
+    - 若原图是竖版，自动旋转为横版
+    """
+    photo_w, photo_h = PHOTO_SIZES["wedding"]   # 591×413
+
+    # 自动处理方向：结婚照是横版，若上传的是竖版则旋转
+    src = img.copy()
+    iw, ih = src.size
+    if ih > iw:
+        src = src.rotate(-90, expand=True)
+
+    photo = fit_photo(src, photo_w, photo_h)
+    canvas = create_canvas(CANVAS_5INCH_H)   # 1500×1050 横版
+    place_grid(canvas, photo, 2, 2, photo_w, photo_h)
     return canvas
 
 
