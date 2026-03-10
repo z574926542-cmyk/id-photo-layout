@@ -1,656 +1,466 @@
 """
-证件照自动排版工具 v2.0
-本地离线运行 · Python + PyQt5 + Pillow
-
-修复：
-  - 上传照片后立即显示缩略图预览
-  - 点击排版类型按钮立即生成排版（无需额外点击"生成"）
-  - 现代卡片式 UI
-  - 照片间距极小，紧密排列
-  - 三寸横排、一寸+二寸混排9+4、驾驶证5×2
+证件照自动排版工具 v5.0
+UI 风格：深色专业风 · 现代高级感
+- 深色背景 + 蓝紫渐变强调色
+- 左侧控制面板 + 右侧大预览区
+- 点击排版按钮即时生成，无需额外操作
 """
 
-import os
 import sys
-import tempfile
+import os
+from pathlib import Path
+
+from PIL import Image
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QFileDialog, QScrollArea, QFrame,
-    QStatusBar, QSizePolicy, QSpacerItem, QMessageBox
+    QLabel, QPushButton, QFileDialog, QFrame, QSizePolicy,
+    QMessageBox, QProgressBar, QGraphicsDropShadowEffect
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
-from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QColor, QPainter
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import (
+    QPixmap, QImage, QColor, QPalette, QFont, QDragEnterEvent, QDropEvent
+)
 
-from PIL import Image
-from layout_engine import generate_layout, save_layout, TEMPLATES, TEMPLATE_DESC
-
+from layout_engine import generate_layout, save_layout, TEMPLATE_DESC
 
 # ─────────────────────────────────────────────
-# PIL Image → QPixmap
+# 颜色主题
 # ─────────────────────────────────────────────
+C = {
+    "bg":          "#0f0f1a",
+    "panel":       "#15152a",
+    "card":        "#1c1c35",
+    "card_hover":  "#22223e",
+    "border":      "#2c2c50",
+    "border_hi":   "#5b6cf9",
+    "accent":      "#5b6cf9",
+    "accent2":     "#8b5cf6",
+    "accent_text": "#a5b4fc",
+    "text":        "#e8e8ff",
+    "text2":       "#8888bb",
+    "muted":       "#44446a",
+    "success":     "#34d399",
+    "preview":     "#0a0a16",
+}
 
-def pil_to_pixmap(pil_img: Image.Image) -> QPixmap:
-    """将 PIL Image 转换为 QPixmap（用于 Qt 显示）。"""
-    if pil_img.mode != "RGB":
-        pil_img = pil_img.convert("RGB")
-    data = pil_img.tobytes("raw", "RGB")
-    qimg = QImage(data, pil_img.width, pil_img.height, pil_img.width * 3, QImage.Format_RGB888)
+# ─────────────────────────────────────────────
+# 工具函数
+# ─────────────────────────────────────────────
+def pil_to_qpixmap(img: Image.Image) -> QPixmap:
+    rgb = img.convert("RGB")
+    data = rgb.tobytes("raw", "RGB")
+    qimg = QImage(data, rgb.width, rgb.height, rgb.width * 3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
+def shadow(radius=24, color="#5b6cf9", alpha=60, dy=6):
+    e = QGraphicsDropShadowEffect()
+    e.setBlurRadius(radius)
+    c = QColor(color); c.setAlpha(alpha)
+    e.setColor(c); e.setOffset(0, dy)
+    return e
 
 # ─────────────────────────────────────────────
-# 工作线程（防止 UI 卡顿）
+# 后台排版线程
 # ─────────────────────────────────────────────
+class Worker(QThread):
+    done  = pyqtSignal(object, str)
+    fail  = pyqtSignal(str)
 
-class LayoutWorker(QThread):
-    finished = pyqtSignal(object)   # PIL Image
-    error    = pyqtSignal(str)
-
-    def __init__(self, img, template_name):
+    def __init__(self, img, name):
         super().__init__()
-        self.img = img
-        self.template_name = template_name
+        self.img, self.name = img, name
 
     def run(self):
         try:
-            result = generate_layout(self.img, self.template_name)
-            self.finished.emit(result)
+            self.done.emit(generate_layout(self.img, self.name), self.name)
         except Exception as e:
-            self.error.emit(str(e))
-
+            self.fail.emit(str(e))
 
 # ─────────────────────────────────────────────
-# 拖拽上传区域
+# 上传区域
 # ─────────────────────────────────────────────
+class UploadZone(QLabel):
+    loaded = pyqtSignal(object)   # PIL Image
 
-class DropArea(QLabel):
-    file_dropped = pyqtSignal(str)
-
-    IDLE_STYLE = """
-        QLabel {
-            border: 2px dashed #4A90D9;
-            border-radius: 10px;
-            background: #F0F7FF;
-            color: #4A90D9;
-            font-size: 14px;
-        }
-        QLabel:hover {
-            background: #E0F0FF;
-            border-color: #2272C3;
-        }
+    _IDLE = f"""
+        QLabel {{
+            background: {C['card']};
+            border: 2px dashed {C['border_hi']};
+            border-radius: 14px;
+            color: {C['text2']};
+            font-size: 13px;
+        }}
+        QLabel:hover {{
+            background: {C['card_hover']};
+            border-color: #818cf8;
+        }}
     """
-    HOVER_STYLE = """
-        QLabel {
-            border: 2px dashed #2272C3;
-            border-radius: 10px;
-            background: #D6EAFF;
-            color: #2272C3;
-            font-size: 14px;
-        }
-    """
-    LOADED_STYLE = """
-        QLabel {
-            border: 2px solid #22C55E;
-            border-radius: 10px;
-            background: #F0FFF4;
-        }
+    _ACTIVE = f"""
+        QLabel {{
+            background: {C['card']};
+            border: 2px solid {C['accent']};
+            border-radius: 14px;
+        }}
     """
 
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(160)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(self.IDLE_STYLE)
-        self._show_idle()
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._pil = None
+        self._idle()
 
-    def _show_idle(self):
-        self.setText("📂  拖入照片\n或点击此处选择文件\n\n支持 JPG / PNG / BMP")
+    def _idle(self):
+        self.setText("拖入照片\n\n点击选择文件\n\nJPG · PNG · BMP")
+        self.setStyleSheet(self._IDLE)
 
-    def show_preview(self, pil_img: Image.Image):
-        """显示上传照片的缩略图。"""
-        self.setStyleSheet(self.LOADED_STYLE)
-        pixmap = pil_to_pixmap(pil_img)
-        scaled = pixmap.scaled(
-            self.width() - 16, self.height() - 16,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.setPixmap(scaled)
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            p, _ = QFileDialog.getOpenFileName(self, "选择证件照", "",
+                "图片 (*.jpg *.jpeg *.png *.bmp *.tiff *.webp)")
+            if p: self._load(p)
 
-    def reset(self):
-        self.setStyleSheet(self.IDLE_STYLE)
-        self.setPixmap(QPixmap())
-        self._show_idle()
+    def dragEnterEvent(self, e: QDragEnterEvent):
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择证件照", "",
-                "图片文件 (*.jpg *.jpeg *.png *.bmp *.tiff *.webp);;所有文件 (*)"
-            )
-            if path:
-                self.file_dropped.emit(path)
+    def dropEvent(self, e: QDropEvent):
+        urls = e.mimeData().urls()
+        if urls: self._load(urls[0].toLocalFile())
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-            self.setStyleSheet(self.HOVER_STYLE)
+    def _load(self, path: str):
+        try:
+            img = Image.open(path).convert("RGB")
+            self._pil = img
+            thumb = img.copy()
+            thumb.thumbnail((280, 160), Image.LANCZOS)
+            self.setPixmap(pil_to_qpixmap(thumb))
+            self.setStyleSheet(self._ACTIVE)
+            self.setToolTip(f"{Path(path).name}  {img.width}×{img.height}px")
+            self.loaded.emit(img)
+        except Exception as ex:
+            QMessageBox.warning(self, "加载失败", str(ex))
 
-    def dragLeaveEvent(self, event):
-        if self.pixmap() and not self.pixmap().isNull():
-            self.setStyleSheet(self.LOADED_STYLE)
-        else:
-            self.setStyleSheet(self.IDLE_STYLE)
-
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            if os.path.isfile(path):
-                self.file_dropped.emit(path)
-        self.dragLeaveEvent(None)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # 如果已有图片，重新缩放
-        if hasattr(self, '_loaded_img') and self._loaded_img:
-            self.show_preview(self._loaded_img)
-
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._pil:
+            thumb = self._pil.copy()
+            thumb.thumbnail((self.width()-20, self.height()-20), Image.LANCZOS)
+            self.setPixmap(pil_to_qpixmap(thumb))
 
 # ─────────────────────────────────────────────
-# 排版类型按钮（卡片式）
+# 排版按钮
 # ─────────────────────────────────────────────
-
-class TemplateButton(QPushButton):
-    NORMAL_STYLE = """
+class LayoutBtn(QPushButton):
+    _N = f"""
         QPushButton {{
-            background: white;
-            border: 1.5px solid #E0E6F0;
+            background: {C['card']};
+            border: 1px solid {C['border']};
             border-radius: 10px;
-            text-align: left;
-            padding: 10px 14px;
-            color: #1A2340;
+            padding: 0;
         }}
         QPushButton:hover {{
-            background: #F0F7FF;
-            border-color: #4A90D9;
-            color: #2272C3;
+            background: {C['card_hover']};
+            border-color: {C['border_hi']};
         }}
-        QPushButton:pressed {{
-            background: #E0F0FF;
-        }}
+        QPushButton:pressed {{ background: {C['card']}; }}
     """
-    ACTIVE_STYLE = """
+    _A = f"""
         QPushButton {{
-            background: #2272C3;
-            border: 1.5px solid #2272C3;
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                stop:0 {C['accent']}, stop:1 {C['accent2']});
+            border: none;
             border-radius: 10px;
-            text-align: left;
-            padding: 10px 14px;
-            color: white;
+            padding: 0;
         }}
     """
 
-    def __init__(self, name: str, desc: str):
+    def __init__(self, name, desc):
         super().__init__()
-        self.template_name = name
-        self._active = False
-        self._update_text(name, desc)
-        self.setStyleSheet(self.NORMAL_STYLE)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(52)
+        self.name = name
+        lo = QVBoxLayout(self)
+        lo.setContentsMargins(12, 10, 12, 10)
+        lo.setSpacing(3)
 
-    def _update_text(self, name, desc):
-        self.setText(f"  {name}\n  {desc}")
-        font = self.font()
-        font.setPointSize(10)
-        self.setFont(font)
+        self._t = QLabel(name)
+        self._t.setStyleSheet(f"font-size:14px;font-weight:600;color:{C['text']};background:transparent;")
+        self._t.setAlignment(Qt.AlignCenter)
 
-    def set_active(self, active: bool):
-        self._active = active
-        if active:
-            self.setStyleSheet(self.ACTIVE_STYLE)
+        self._d = QLabel(desc)
+        self._d.setStyleSheet(f"font-size:10px;color:{C['text2']};background:transparent;")
+        self._d.setAlignment(Qt.AlignCenter)
+
+        lo.addWidget(self._t)
+        lo.addWidget(self._d)
+        self.setFixedHeight(68)
+        self.setStyleSheet(self._N)
+
+    def activate(self, on: bool):
+        if on:
+            self.setStyleSheet(self._A)
+            self._t.setStyleSheet("font-size:14px;font-weight:600;color:#fff;background:transparent;")
+            self._d.setStyleSheet("font-size:10px;color:rgba(255,255,255,0.7);background:transparent;")
         else:
-            self.setStyleSheet(self.NORMAL_STYLE)
+            self.setStyleSheet(self._N)
+            self._t.setStyleSheet(f"font-size:14px;font-weight:600;color:{C['text']};background:transparent;")
+            self._d.setStyleSheet(f"font-size:10px;color:{C['text2']};background:transparent;")
 
+# ─────────────────────────────────────────────
+# 预览区
+# ─────────────────────────────────────────────
+class Preview(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._img = None
+        self._idle()
+
+    def _idle(self):
+        self.setText("选择排版类型后，预览将在此显示")
+        self.setStyleSheet(f"""
+            QLabel {{
+                background:{C['preview']};
+                border:1px solid {C['border']};
+                border-radius:16px;
+                color:{C['muted']};
+                font-size:14px;
+            }}
+        """)
+
+    def show(self, img: Image.Image):
+        self._img = img
+        self._render()
+        self.setStyleSheet(f"""
+            QLabel {{
+                background:{C['preview']};
+                border:1px solid {C['border']};
+                border-radius:16px;
+                padding:12px;
+            }}
+        """)
+
+    def _render(self):
+        if not self._img: return
+        w = max(self.width()-32, 100)
+        h = max(self.height()-32, 100)
+        t = self._img.copy()
+        t.thumbnail((w, h), Image.LANCZOS)
+        self.setPixmap(pil_to_qpixmap(t))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self._img: self._render()
+
+    def result(self): return self._img
+
+# ─────────────────────────────────────────────
+# 分隔线
+# ─────────────────────────────────────────────
+def divider():
+    f = QFrame(); f.setFrameShape(QFrame.HLine)
+    f.setStyleSheet(f"color:{C['border']};background:{C['border']};max-height:1px;")
+    return f
 
 # ─────────────────────────────────────────────
 # 主窗口
 # ─────────────────────────────────────────────
-
-class MainWindow(QMainWindow):
+class App(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("证件照自动排版工具")
-        self.resize(1100, 720)
-        self.setMinimumSize(900, 600)
+        self.setWindowTitle("证件照排版工具")
+        self.resize(1180, 780)
+        self.setMinimumSize(960, 640)
+        self.setStyleSheet(f"QMainWindow,QWidget{{background:{C['bg']};color:{C['text']};font-family:'PingFang SC','Microsoft YaHei',Arial,sans-serif;}}")
 
-        self.source_image = None    # PIL Image（原始上传）
-        self.result_image = None    # PIL Image（排版结果）
-        self.worker = None
-        self.active_template_btn = None
+        self._src = None
+        self._res = None
+        self._cur = None
+        self._worker = None
+        self._build()
 
-        self._build_ui()
-        self._apply_global_styles()
+    def _build(self):
+        root = QWidget(); self.setCentralWidget(root)
+        hl = QHBoxLayout(root); hl.setContentsMargins(0,0,0,0); hl.setSpacing(0)
 
-    # ─────────────────────────────────────────
-    # UI 构建
-    # ─────────────────────────────────────────
+        # ── 左侧面板 ──
+        left = QWidget()
+        left.setFixedWidth(340)
+        left.setStyleSheet(f"background:{C['panel']};border-right:1px solid {C['border']};")
+        ll = QVBoxLayout(left); ll.setContentsMargins(22,26,22,22); ll.setSpacing(16)
 
-    def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        # 品牌标题
+        brand = QLabel("证件照排版")
+        brand.setStyleSheet(f"font-size:20px;font-weight:700;color:{C['text']};letter-spacing:1px;")
+        sub = QLabel("ID PHOTO LAYOUT  ·  本地离线")
+        sub.setStyleSheet(f"font-size:10px;color:{C['muted']};letter-spacing:2px;margin-top:-4px;")
+        ll.addWidget(brand); ll.addWidget(sub)
+        ll.addWidget(divider())
 
-        # 顶部标题栏
-        root.addWidget(self._build_header())
+        # 上传区
+        lbl_up = QLabel("上传照片")
+        lbl_up.setStyleSheet(f"font-size:11px;font-weight:600;color:{C['text2']};letter-spacing:1px;")
+        ll.addWidget(lbl_up)
 
-        # 主体（左右分栏）
-        body = QWidget()
-        body.setObjectName("body")
-        body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(18, 16, 18, 16)
-        body_layout.setSpacing(16)
+        self.upload = UploadZone()
+        self.upload.loaded.connect(self._on_load)
+        ll.addWidget(self.upload)
 
-        left = self._build_left_panel()
-        left.setFixedWidth(300)
-        body_layout.addWidget(left)
+        self.info = QLabel("未选择照片")
+        self.info.setAlignment(Qt.AlignCenter)
+        self.info.setStyleSheet(f"font-size:11px;color:{C['muted']};")
+        ll.addWidget(self.info)
 
-        right = self._build_preview_panel()
-        body_layout.addWidget(right, 1)
+        ll.addWidget(divider())
 
-        root.addWidget(body, 1)
+        # 排版按钮
+        lbl_tp = QLabel("选择排版类型")
+        lbl_tp.setStyleSheet(f"font-size:11px;font-weight:600;color:{C['text2']};letter-spacing:1px;")
+        ll.addWidget(lbl_tp)
 
-        # 状态栏
-        self.status_bar = QStatusBar()
-        self.status_bar.setObjectName("statusBar")
-        self.status_bar.showMessage("请上传一张证件照，然后点击排版类型即可生成排版")
-        self.setStatusBar(self.status_bar)
+        TEMPLATES = [
+            ("一寸排版",      "3×3 · 9张 · 5寸竖版"),
+            ("二寸排版",      "2×2 · 4张 · 5寸竖版"),
+            ("小二寸排版",    "2×2 · 4张 · 5寸竖版"),
+            ("三寸排版",      "1×2 · 2张 · 5寸竖版"),
+            ("驾驶证排版",    "5×2 · 10张 · 5寸横版"),
+            ("一寸+二寸排版", "9+4张 · 7寸横版"),
+        ]
+        self._btns = {}
+        for i in range(0, len(TEMPLATES), 2):
+            row = QWidget(); row.setStyleSheet("background:transparent;")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+            for j in range(2):
+                if i+j < len(TEMPLATES):
+                    n, d = TEMPLATES[i+j]
+                    b = LayoutBtn(n, d)
+                    b.clicked.connect(lambda _, name=n: self._on_tmpl(name))
+                    self._btns[n] = b
+                    rl.addWidget(b)
+            ll.addWidget(row)
 
-    def _build_header(self):
-        header = QWidget()
-        header.setObjectName("header")
-        header.setFixedHeight(56)
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 0, 24, 0)
-
-        title = QLabel("证件照自动排版工具")
-        title.setObjectName("headerTitle")
-
-        badge = QLabel("本地离线 · 免费使用")
-        badge.setObjectName("headerBadge")
-
-        layout.addWidget(title)
-        layout.addStretch()
-        layout.addWidget(badge)
-        return header
-
-    def _build_left_panel(self):
-        panel = QWidget()
-        panel.setObjectName("leftPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
-
-        # ── 上传区域 ──
-        upload_card = self._make_card("上传照片")
-        upload_inner = QVBoxLayout()
-        upload_inner.setSpacing(8)
-
-        self.drop_area = DropArea()
-        self.drop_area.file_dropped.connect(self._load_image)
-        upload_inner.addWidget(self.drop_area)
-
-        self.file_info_label = QLabel("")
-        self.file_info_label.setObjectName("fileInfo")
-        self.file_info_label.setAlignment(Qt.AlignCenter)
-        self.file_info_label.setWordWrap(True)
-        upload_inner.addWidget(self.file_info_label)
-
-        upload_card.layout().addLayout(upload_inner)
-        layout.addWidget(upload_card)
-
-        # ── 排版类型 ──
-        tmpl_card = self._make_card("选择排版类型（点击即生成）")
-        self.template_buttons = {}
-        for name, _ in TEMPLATES.items():
-            desc = TEMPLATE_DESC.get(name, "")
-            btn = TemplateButton(name, desc)
-            btn.clicked.connect(lambda checked, n=name: self._on_template_clicked(n))
-            self.template_buttons[name] = btn
-            tmpl_card.layout().addWidget(btn)
-
-        layout.addWidget(tmpl_card)
-
-        # ── 导出按钮 ──
-        self.btn_export = QPushButton("⬇  导出图片  (JPG · 300 DPI)")
-        self.btn_export.setObjectName("btnExport")
-        self.btn_export.setCursor(Qt.PointingHandCursor)
-        self.btn_export.setEnabled(False)
-        self.btn_export.setMinimumHeight(46)
-        self.btn_export.clicked.connect(self._export)
-        layout.addWidget(self.btn_export)
-
-        layout.addStretch()
-        return panel
-
-    def _make_card(self, title: str) -> QFrame:
-        """创建带标题的白色卡片容器。"""
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 12, 14, 14)
-        card_layout.setSpacing(10)
-
-        title_label = QLabel(title)
-        title_label.setObjectName("cardTitle")
-        card_layout.addWidget(title_label)
-
-        return card
-
-    def _build_preview_panel(self):
-        panel = QFrame()
-        panel.setObjectName("previewPanel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(14, 12, 14, 14)
-        layout.setSpacing(8)
-
-        # 标题行
-        title_row = QHBoxLayout()
-        self.preview_title = QLabel("排版预览")
-        self.preview_title.setObjectName("previewTitle")
-        title_row.addWidget(self.preview_title)
-        title_row.addStretch()
-        self.preview_info = QLabel("")
-        self.preview_info.setObjectName("previewInfo")
-        title_row.addWidget(self.preview_info)
-        layout.addLayout(title_row)
-
-        # 滚动区域
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setAlignment(Qt.AlignCenter)
-        scroll.setObjectName("scrollArea")
-
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setObjectName("previewLabel")
-        self.preview_label.setText("上传照片后，点击左侧排版类型即可生成预览")
-        self.preview_label.setMinimumSize(500, 400)
-        scroll.setWidget(self.preview_label)
-
-        layout.addWidget(scroll, 1)
-        return panel
-
-    # ─────────────────────────────────────────
-    # 全局样式
-    # ─────────────────────────────────────────
-
-    def _apply_global_styles(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background: #F2F4F8;
-            }
-            QWidget#body {
-                background: #F2F4F8;
-            }
-            /* 顶部标题栏 */
-            QWidget#header {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #1A56DB, stop:1 #2272C3);
-            }
-            QLabel#headerTitle {
-                color: white;
-                font-size: 20px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-            QLabel#headerBadge {
-                color: rgba(255,255,255,0.75);
-                font-size: 11px;
-                background: rgba(255,255,255,0.15);
-                border-radius: 10px;
-                padding: 3px 10px;
-            }
-            /* 卡片 */
-            QFrame#card {
-                background: white;
-                border-radius: 12px;
-                border: 1px solid #E8ECF4;
-            }
-            QLabel#cardTitle {
-                font-size: 12px;
-                font-weight: bold;
-                color: #374151;
-                padding-bottom: 2px;
-                border-bottom: 1px solid #F0F2F8;
-            }
-            /* 文件信息 */
-            QLabel#fileInfo {
-                font-size: 11px;
-                color: #22C55E;
-            }
-            /* 预览面板 */
-            QFrame#previewPanel {
-                background: white;
-                border-radius: 12px;
-                border: 1px solid #E8ECF4;
-            }
-            QLabel#previewTitle {
-                font-size: 13px;
-                font-weight: bold;
-                color: #374151;
-            }
-            QLabel#previewInfo {
-                font-size: 11px;
-                color: #6B7280;
-            }
-            QLabel#previewLabel {
-                color: #9CA3AF;
-                font-size: 13px;
-                background: #FAFBFC;
-                border-radius: 8px;
-            }
-            QScrollArea#scrollArea {
-                border: none;
-                background: #FAFBFC;
-                border-radius: 8px;
-            }
-            /* 导出按钮 */
-            QPushButton#btnExport {
-                background: #22C55E;
-                color: white;
-                border: none;
-                border-radius: 10px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton#btnExport:hover {
-                background: #16A34A;
-            }
-            QPushButton#btnExport:pressed {
-                background: #15803D;
-            }
-            QPushButton#btnExport:disabled {
-                background: #D1D5DB;
-                color: #9CA3AF;
-            }
-            /* 状态栏 */
-            QStatusBar#statusBar {
-                background: #F8FAFF;
-                color: #6B7280;
-                font-size: 11px;
-                border-top: 1px solid #E8ECF4;
-            }
+        # 进度条
+        self.prog = QProgressBar()
+        self.prog.setRange(0,0); self.prog.setFixedHeight(3); self.prog.setVisible(False)
+        self.prog.setStyleSheet(f"""
+            QProgressBar{{background:{C['border']};border:none;border-radius:2px;}}
+            QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                stop:0 {C['accent']},stop:1 {C['accent2']});border-radius:2px;}}
         """)
+        ll.addWidget(self.prog)
+        ll.addStretch()
 
-    # ─────────────────────────────────────────
-    # 事件处理
-    # ─────────────────────────────────────────
+        # 导出按钮
+        self.btn_exp = QPushButton("导出 JPG  ·  300 DPI")
+        self.btn_exp.setEnabled(False)
+        self.btn_exp.setFixedHeight(46)
+        self.btn_exp.setStyleSheet(f"""
+            QPushButton{{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {C['accent']},stop:1 {C['accent2']});
+                color:#fff;font-size:14px;font-weight:600;
+                border:none;border-radius:11px;letter-spacing:1px;
+            }}
+            QPushButton:hover{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                stop:0 #818cf8,stop:1 #a78bfa);}}
+            QPushButton:disabled{{background:{C['card']};color:{C['muted']};}}
+            QPushButton:pressed{{background:{C['accent']};}}
+        """)
+        self.btn_exp.clicked.connect(self._export)
+        ll.addWidget(self.btn_exp)
 
-    def _load_image(self, path: str):
-        """加载并显示上传的照片。"""
-        try:
-            img = Image.open(path)
-            # 处理 EXIF 旋转
-            try:
-                from PIL import ImageOps
-                img = ImageOps.exif_transpose(img)
-            except Exception:
-                pass
-            img = img.convert("RGB")
-            self.source_image = img
+        # ── 右侧预览 ──
+        right = QWidget(); right.setStyleSheet(f"background:{C['bg']};")
+        rl2 = QVBoxLayout(right); rl2.setContentsMargins(24,24,24,24); rl2.setSpacing(10)
 
-            # 在上传区域显示缩略图
-            self.drop_area._loaded_img = img
-            self.drop_area.show_preview(img)
+        ph = QHBoxLayout()
+        ptitle = QLabel("排版预览")
+        ptitle.setStyleSheet(f"font-size:13px;font-weight:600;color:{C['text2']};letter-spacing:1px;")
+        self.pinfo = QLabel("")
+        self.pinfo.setStyleSheet(f"font-size:11px;color:{C['muted']};")
+        ph.addWidget(ptitle); ph.addStretch(); ph.addWidget(self.pinfo)
+        rl2.addLayout(ph)
 
-            # 显示文件信息
-            fname = os.path.basename(path)
-            w, h = img.size
-            self.file_info_label.setText(f"✓  {fname}  ({w}×{h} px)")
+        self.preview = Preview()
+        rl2.addWidget(self.preview)
 
-            self.status_bar.showMessage(f"已加载：{fname}  —  请点击左侧排版类型生成排版")
+        hl.addWidget(left)
+        hl.addWidget(right, 1)
 
-            # 如果已有选中的排版类型，自动重新生成
-            if self.active_template_btn:
-                self._generate(self.active_template_btn.template_name)
+    # ── 事件 ──
+    def _on_load(self, img):
+        self._src = img
+        w, h = img.size
+        self.info.setText(f"{w} × {h} px")
+        self.info.setStyleSheet(f"font-size:11px;color:{C['success']};text-align:center;")
+        if self._cur:
+            self._on_tmpl(self._cur)
 
-        except Exception as e:
-            QMessageBox.critical(self, "加载失败", f"无法读取图片：\n{e}")
-
-    def _on_template_clicked(self, template_name: str):
-        """点击排版类型按钮 → 立即生成排版。"""
-        # 更新按钮状态
-        for btn in self.template_buttons.values():
-            btn.set_active(False)
-        self.template_buttons[template_name].set_active(True)
-        self.active_template_btn = self.template_buttons[template_name]
-
-        if self.source_image is None:
-            self.status_bar.showMessage("请先上传一张证件照")
+    def _on_tmpl(self, name):
+        for n, b in self._btns.items(): b.activate(n == name)
+        self._cur = name
+        if not self._src:
+            self.pinfo.setText("请先上传照片")
             return
+        self.prog.setVisible(True)
+        self.btn_exp.setEnabled(False)
+        self.pinfo.setText("生成中...")
+        self.pinfo.setStyleSheet(f"font-size:11px;color:{C['text2']};")
+        self._worker = Worker(self._src, name)
+        self._worker.done.connect(self._on_done)
+        self._worker.fail.connect(self._on_fail)
+        self._worker.start()
 
-        self._generate(template_name)
+    def _on_done(self, img, name):
+        self._res = img
+        self.prog.setVisible(False)
+        self.preview.show(img)
+        self.btn_exp.setEnabled(True)
+        w, h = img.size
+        self.pinfo.setText(f"{name}  ·  {w}×{h}px  ·  300 DPI")
+        self.pinfo.setStyleSheet(f"font-size:11px;color:{C['success']};")
 
-    def _generate(self, template_name: str):
-        """启动排版工作线程。"""
-        if self.source_image is None:
-            return
-
-        # 禁用导出按钮，显示进度
-        self.btn_export.setEnabled(False)
-        self.preview_label.setText("正在生成排版，请稍候…")
-        self.status_bar.showMessage(f"正在生成「{template_name}」…")
-
-        # 停止旧线程
-        if self.worker and self.worker.isRunning():
-            self.worker.quit()
-            self.worker.wait()
-
-        self.worker = LayoutWorker(self.source_image, template_name)
-        self.worker.finished.connect(lambda img: self._on_layout_done(img, template_name))
-        self.worker.error.connect(self._on_layout_error)
-        self.worker.start()
-
-    def _on_layout_done(self, result_img: Image.Image, template_name: str):
-        """排版完成，显示预览。"""
-        self.result_image = result_img
-
-        # 转为 QPixmap 并缩放到预览区域
-        pixmap = pil_to_pixmap(result_img)
-        preview_w = self.preview_label.width() - 20
-        preview_h = self.preview_label.height() - 20
-        if preview_w < 100:
-            preview_w = 600
-        if preview_h < 100:
-            preview_h = 500
-
-        scaled = pixmap.scaled(
-            preview_w, preview_h,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.preview_label.setPixmap(scaled)
-
-        # 更新信息
-        w, h = result_img.size
-        self.preview_info.setText(f"{w}×{h} px · 300 DPI")
-        self.btn_export.setEnabled(True)
-        self.status_bar.showMessage(f"「{template_name}」排版完成，点击「导出图片」保存")
-
-    def _on_layout_error(self, msg: str):
-        self.preview_label.setText(f"排版失败：{msg}")
-        self.status_bar.showMessage(f"排版出错：{msg}")
+    def _on_fail(self, msg):
+        self.prog.setVisible(False)
+        self.pinfo.setText(f"失败：{msg}")
+        self.pinfo.setStyleSheet("font-size:11px;color:#f87171;")
 
     def _export(self):
-        """导出排版图片。"""
-        if self.result_image is None:
-            return
-
-        # 获取当前排版名称
-        tmpl_name = ""
-        if self.active_template_btn:
-            tmpl_name = self.active_template_btn.template_name.replace("+", "_").replace(" ", "")
-
-        default_name = f"排版_{tmpl_name}.jpg"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存排版图片", default_name,
-            "JPEG 图片 (*.jpg *.jpeg);;所有文件 (*)"
-        )
+        if not self._res: return
+        name = f"{self._cur or '排版'}.jpg"
+        path, _ = QFileDialog.getSaveFileName(self, "导出排版图片", name, "JPEG (*.jpg *.jpeg)")
         if path:
+            if not path.lower().endswith(('.jpg','.jpeg')): path += '.jpg'
             try:
-                save_layout(self.result_image, path)
-                self.status_bar.showMessage(f"已导出：{path}")
-                QMessageBox.information(self, "导出成功", f"排版图片已保存至：\n{path}")
+                save_layout(self._res, path)
+                self.pinfo.setText(f"已导出：{Path(path).name}")
+                self.pinfo.setStyleSheet(f"font-size:11px;color:{C['success']};")
             except Exception as e:
-                QMessageBox.critical(self, "导出失败", f"保存失败：\n{e}")
-
-    def resizeEvent(self, event):
-        """窗口缩放时更新预览。"""
-        super().resizeEvent(event)
-        if self.result_image:
-            pixmap = pil_to_pixmap(self.result_image)
-            preview_w = self.preview_label.width() - 20
-            preview_h = self.preview_label.height() - 20
-            if preview_w > 50 and preview_h > 50:
-                scaled = pixmap.scaled(
-                    preview_w, preview_h,
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-                self.preview_label.setPixmap(scaled)
-
+                QMessageBox.critical(self, "导出失败", str(e))
 
 # ─────────────────────────────────────────────
 # 入口
 # ─────────────────────────────────────────────
-
 def main():
-    # 高 DPI 支持
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
     app = QApplication(sys.argv)
+    app.setApplicationName("证件照排版工具")
+    app.setStyle("Fusion")
 
-    # 设置字体（Windows 用微软雅黑，macOS 用苹方，Linux 用 Noto Sans）
-    font = QFont()
-    import platform
-    if platform.system() == "Windows":
-        font.setFamily("Microsoft YaHei")
-    elif platform.system() == "Darwin":
-        font.setFamily("PingFang SC")
-    else:
-        font.setFamily("Noto Sans CJK SC")
-    font.setPointSize(10)
-    app.setFont(font)
+    pal = QPalette()
+    pal.setColor(QPalette.Window,          QColor(C['bg']))
+    pal.setColor(QPalette.WindowText,      QColor(C['text']))
+    pal.setColor(QPalette.Base,            QColor(C['card']))
+    pal.setColor(QPalette.Text,            QColor(C['text']))
+    pal.setColor(QPalette.Button,          QColor(C['card']))
+    pal.setColor(QPalette.ButtonText,      QColor(C['text']))
+    pal.setColor(QPalette.Highlight,       QColor(C['accent']))
+    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    app.setPalette(pal)
 
-    window = MainWindow()
-    window.show()
+    w = App(); w.show()
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     main()

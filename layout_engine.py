@@ -71,24 +71,22 @@ TEMPLATE_DESC = {
 def fit_photo(img: Image.Image, target_w: int, target_h: int,
               bg_color: tuple = (255, 255, 255)) -> Image.Image:
     """
-    等比缩放照片到目标尺寸（fit模式）：
-    - 保持原始宽高比，不裁剪任何画面内容
-    - 缩放后居中放置在目标尺寸的白色画布上
-    - 多余区域用白色填充
+    等比缩放填满目标尺寸（cover模式）：
+    - 等比缩放到恰好填满目标区域（scale = max）
+    - 超出部分从中心居中裁剪，裁剪量最小
+    - 照片完全铺满格子，无白边
     """
     iw, ih = img.size
-    # 计算等比缩放比例（保证完整显示，不超出目标区域）
-    scale = min(target_w / iw, target_h / ih)
+    # 计算等比缩放比例（保证填满目标区域，裁剪量最小）
+    scale = max(target_w / iw, target_h / ih)
     new_w = round(iw * scale)
     new_h = round(ih * scale)
     resized = img.resize((new_w, new_h), Image.LANCZOS)
 
-    # 创建目标尺寸白色画布，将缩放后的图片居中粘贴
-    canvas = Image.new("RGB", (target_w, target_h), bg_color)
-    paste_x = (target_w - new_w) // 2
-    paste_y = (target_h - new_h) // 2
-    canvas.paste(resized, (paste_x, paste_y))
-    return canvas
+    # 居中裁剪到目标尺寸
+    left = (new_w - target_w) // 2
+    top  = (new_h - target_h) // 2
+    return resized.crop((left, top, left + target_w, top + target_h))
 
 
 def add_border(img: Image.Image, border_w: int = BORDER_WIDTH,
