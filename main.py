@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import (
-    QPixmap, QImage, QColor, QPalette, QFont, QDragEnterEvent, QDropEvent
+    QPixmap, QImage, QColor, QPalette, QFont, QDragEnterEvent, QDropEvent, QIcon
 )
 
 from layout_engine import generate_layout, save_layout, TEMPLATE_DESC
@@ -273,6 +273,10 @@ class App(QMainWindow):
         self.setWindowTitle("证件照排版工具")
         self.resize(1180, 780)
         self.setMinimumSize(960, 640)
+        # 设置窗口图标
+        _ico = Path(__file__).parent / "icon.ico"
+        if not _ico.exists(): _ico = Path(__file__).parent / "icon.png"
+        if _ico.exists(): self.setWindowIcon(QIcon(str(_ico)))
         self.setStyleSheet(f"QMainWindow,QWidget{{background:{C['bg']};color:{C['text']};font-family:'PingFang SC','Microsoft YaHei',Arial,sans-serif;}}")
 
         self._src = None
@@ -447,6 +451,13 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("证件照排版工具")
     app.setStyle("Fusion")
+
+    # 加载应用图标
+    _icon_path = Path(__file__).parent / "icon.ico"
+    if not _icon_path.exists():
+        _icon_path = Path(__file__).parent / "icon.png"
+    if _icon_path.exists():
+        app.setWindowIcon(QIcon(str(_icon_path)))
 
     pal = QPalette()
     pal.setColor(QPalette.Window,          QColor(C['bg']))

@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:   # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   # ─────────────────────────────────────────
@@ -22,20 +22,21 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: |
-          pip install Pillow PyQt5 pyinstaller
+        run: pip install Pillow PyQt5 pyinstaller
 
       - name: 打包为 .exe（单文件）
         run: |
           pyinstaller main.py `
-            --name "证件照排版工具" `
+            --name "IDPhotoTool" `
             --windowed `
             --onefile `
+            --icon "icon.ico" `
             --add-data "layout_engine.py;." `
+            --add-data "icon.ico;." `
+            --add-data "icon.png;." `
             --hidden-import PIL `
             --hidden-import PIL.Image `
             --hidden-import PIL.ImageDraw `
-            --hidden-import PIL.ImageTk `
             --hidden-import PyQt5 `
             --hidden-import PyQt5.QtWidgets `
             --hidden-import PyQt5.QtCore `
@@ -46,7 +47,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/证件照排版工具.exe
+          path: dist/IDPhotoTool.exe
 
   # ─────────────────────────────────────────
   # macOS：打包为 .app 再制作 .dmg
@@ -67,17 +68,34 @@ jobs:
           pip install Pillow PyQt5 pyinstaller
           brew install create-dmg
 
+      - name: 将 icon.png 转换为 icns（macOS 图标）
+        run: |
+          mkdir -p icon.iconset
+          sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_512x512.png
+          iconutil -c icns icon.iconset -o icon.icns
+          echo "✓ icon.icns 生成完成"
+
       - name: 打包为 .app
         run: |
           pyinstaller main.py \
-            --name "证件照排版工具" \
+            --name "IDPhotoTool" \
             --windowed \
             --onedir \
+            --icon "icon.icns" \
             --add-data "layout_engine.py:." \
+            --add-data "icon.ico:." \
+            --add-data "icon.png:." \
             --hidden-import PIL \
             --hidden-import PIL.Image \
             --hidden-import PIL.ImageDraw \
-            --hidden-import PIL.ImageTk \
             --hidden-import PyQt5 \
             --hidden-import PyQt5.QtWidgets \
             --hidden-import PyQt5.QtCore \
@@ -87,38 +105,38 @@ jobs:
       - name: 制作 .dmg 安装包
         run: |
           mkdir -p dmg_staging
-          cp -r "dist/证件照排版工具.app" dmg_staging/
+          cp -r "dist/IDPhotoTool.app" dmg_staging/
           create-dmg \
             --volname "证件照排版工具" \
-            --volicon "dist/证件照排版工具.app/Contents/Resources/icon-windowed.icns" \
+            --volicon "icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
-            --icon-size 100 \
-            --icon "证件照排版工具.app" 175 190 \
-            --hide-extension "证件照排版工具.app" \
+            --icon-size 120 \
+            --icon "IDPhotoTool.app" 175 190 \
+            --hide-extension "IDPhotoTool.app" \
             --app-drop-link 425 190 \
-            "证件照排版工具.dmg" \
+            "IDPhotoTool-macOS.dmg" \
             dmg_staging/ \
           || \
           create-dmg \
             --volname "证件照排版工具" \
             --window-pos 200 120 \
             --window-size 600 400 \
-            --icon-size 100 \
-            --icon "证件照排版工具.app" 175 190 \
-            --hide-extension "证件照排版工具.app" \
+            --icon-size 120 \
+            --icon "IDPhotoTool.app" 175 190 \
+            --hide-extension "IDPhotoTool.app" \
             --app-drop-link 425 190 \
-            "证件照排版工具.dmg" \
+            "IDPhotoTool-macOS.dmg" \
             dmg_staging/
 
       - name: 上传 macOS 构建产物
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: 证件照排版工具.dmg
+          path: IDPhotoTool-macOS.dmg
 
   # ─────────────────────────────────────────
-  # 发布 Release：将两个产物上传到 GitHub Release
+  # 发布 Release
   # ─────────────────────────────────────────
   release:
     needs: [build-windows, build-macos]
@@ -141,31 +159,36 @@ jobs:
       - name: 列出产物
         run: ls -lh artifacts/
 
-      - name: 创建/更新 GitHub Release
+      - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || 'v1.0' }}
-          name: 证件照排版工具 ${{ github.ref_name || 'v1.0' }}
+          tag_name: ${{ github.ref_name }}
+          name: 证件照排版工具 ${{ github.ref_name }}
           body: |
             ## 证件照自动排版工具
 
-            ### 下载说明
+            ### 下载安装
             | 系统 | 文件 | 说明 |
             |------|------|------|
-            | Windows | `证件照排版工具.exe` | 双击直接运行，无需安装 |
-            | macOS | `证件照排版工具.dmg` | 打开后拖入 Applications 即可 |
+            | Windows | `IDPhotoTool-Windows.exe` | 双击直接运行，无需安装 |
+            | macOS | `IDPhotoTool-macOS.dmg` | 打开后将 App 拖入 Applications |
 
-            ### 功能
-            - 一寸排版（3×3，9张）
-            - 二寸排版（2×2，4张）
-            - 小二寸排版（2×2，4张）
-            - 三寸排版（1×2，2张）
-            - 驾驶证排版（5×2，10张）
-            - 一寸+二寸混排（7寸画布）
-            - 自动方向检测 · 深灰描边 · 导出 300DPI JPG
+            ### 支持排版类型
+            - 一寸排版（3×3，9张，5寸竖版）
+            - 二寸排版（2×2，4张，5寸竖版）
+            - 小二寸排版（2×2，4张，5寸竖版）
+            - 三寸排版（1×2，2张，5寸竖版）
+            - 驾驶证排版（5×2，10张，5寸横版）
+            - 一寸+二寸混排（9+4张，7寸横版）
+
+            ### 特性
+            - 等比填满 + 居中裁剪（最小裁剪）
+            - 自动方向检测
+            - 深灰描边（方便裁剪）
+            - 导出 300 DPI JPG
             - 完全离线，无需联网
           files: |
-            artifacts/证件照排版工具.exe
-            artifacts/证件照排版工具.dmg
+            artifacts/IDPhotoTool.exe
+            artifacts/IDPhotoTool-macOS.dmg
           draft: false
           prerelease: false
