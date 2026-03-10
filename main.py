@@ -64,168 +64,336 @@ def shadow(radius=24, color="#5b6cf9", alpha=60, dy=6):
     return e
 
 # ─────────────────────────────────────────────
-# 裁剪调整弹窗
+# PS 风格裁剪弹窗
 # ─────────────────────────────────────────────
+
+HIT_NONE   = 0
+HIT_MOVE   = 1   # 框内拖动
+HIT_TL     = 2   # 左上角
+HIT_TR     = 3   # 右上角
+HIT_BL     = 4   # 左下角
+HIT_BR     = 5   # 右下角
+HIT_T      = 6   # 上边
+HIT_B      = 7   # 下边
+HIT_L      = 8   # 左边
+HIT_R      = 9   # 右边
+
+HANDLE_R   = 6   # 控制点半径
+
+
 class CropCanvas(QWidget):
-    """弹窗内的裁剪画布：拖动移位 + 滚轮缩放"""
+    """
+    PS 风格裁剪画布：
+    - 图片居中显示，不动
+    - 裁剪框可拖动整体移动
+    - 四角拖动：等比缩放裁剪框
+    - 四边拖动：单边自由拉伸（不等比）
+    - 框外半透明遗罩
+    """
     def __init__(self, pil_img: Image.Image):
         super().__init__()
-        self._orig   = pil_img
-        self._scale  = 1.0          # 相对于"填满"状态的缩放倍率
-        self._ox     = pil_img.width  / 2.0   # 裁剪中心 X（原图像素）
-        self._oy     = pil_img.height / 2.0   # 裁剪中心 Y（原图像素）
-        self._drag   = None
-        self._drag_ox = 0.0
-        self._drag_oy = 0.0
-        self.setMinimumSize(480, 360)
-        self.setCursor(Qt.OpenHandCursor)
-        self.setStyleSheet(f"background:{C['preview']};border-radius:10px;")
+        self.setMouseTracking(True)
+        self.setMinimumSize(560, 420)
+        self.setStyleSheet(f"background:{C['preview']};")
 
-    def _crop_rect(self):
-        """返回当前裁剪框 (x0,y0,x1,y1)，保证在图片范围内"""
+        self._orig = pil_img
+        iw, ih = pil_img.size
+
+        # 裁剪框坐标（原图像素空间）
+        self._cx0 = 0.0
+        self._cy0 = 0.0
+        self._cx1 = float(iw)
+        self._cy1 = float(ih)
+
+        # 拖动状态
+        self._hit       = HIT_NONE
+        self._drag_start = None   # (mouse_x, mouse_y)
+        self._drag_box   = None   # (cx0, cy0, cx1, cy1) at drag start
+
+    # ── 坐标转换 ──
+    def _img_rect_on_widget(self):
+        """图片在窗口中的显示区域 (wx0, wy0, wx1, wy1)"""
         iw, ih = self._orig.size
         ww, wh = self.width(), self.height()
-        if ww <= 0 or wh <= 0:
-            return None
-        aspect = ww / wh
-        if iw / ih > aspect:
-            crop_h = ih / self._scale
-            crop_w = crop_h * aspect
-        else:
-            crop_w = iw / self._scale
-            crop_h = crop_w / aspect
-        x0 = self._ox - crop_w / 2
-        y0 = self._oy - crop_h / 2
-        x1 = x0 + crop_w
-        y1 = y0 + crop_h
-        if x0 < 0:   x0, x1 = 0, crop_w
-        if y0 < 0:   y0, y1 = 0, crop_h
-        if x1 > iw:  x1, x0 = iw, iw - crop_w
-        if y1 > ih:  y1, y0 = ih, ih - crop_h
-        if crop_w >= iw: x0, x1 = 0, iw
-        if crop_h >= ih: y0, y1 = 0, ih
-        return (int(x0), int(y0), int(x1), int(y1))
+        scale = min(ww / iw, wh / ih)
+        dw = iw * scale
+        dh = ih * scale
+        wx0 = (ww - dw) / 2
+        wy0 = (wh - dh) / 2
+        return wx0, wy0, wx0 + dw, wy0 + dh, scale
 
+    def _img_to_widget(self, ix, iy):
+        wx0, wy0, _, _, scale = self._img_rect_on_widget()
+        return wx0 + ix * scale, wy0 + iy * scale
+
+    def _widget_to_img(self, wx, wy):
+        wx0, wy0, _, _, scale = self._img_rect_on_widget()
+        return (wx - wx0) / scale, (wy - wy0) / scale
+
+    def _crop_box_widget(self):
+        """裁剪框在窗口坐标系中的位置"""
+        x0, y0 = self._img_to_widget(self._cx0, self._cy0)
+        x1, y1 = self._img_to_widget(self._cx1, self._cy1)
+        return x0, y0, x1, y1
+
+    # ── 命中测试 ──
+    def _hit_test(self, mx, my):
+        x0, y0, x1, y1 = self._crop_box_widget()
+        r = HANDLE_R
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+
+        # 四角（优先判断）
+        if abs(mx - x0) <= r and abs(my - y0) <= r: return HIT_TL
+        if abs(mx - x1) <= r and abs(my - y0) <= r: return HIT_TR
+        if abs(mx - x0) <= r and abs(my - y1) <= r: return HIT_BL
+        if abs(mx - x1) <= r and abs(my - y1) <= r: return HIT_BR
+        # 四边中点
+        if abs(mx - cx) <= r and abs(my - y0) <= r: return HIT_T
+        if abs(mx - cx) <= r and abs(my - y1) <= r: return HIT_B
+        if abs(mx - x0) <= r and abs(my - cy) <= r: return HIT_L
+        if abs(mx - x1) <= r and abs(my - cy) <= r: return HIT_R
+        # 框内
+        if x0 < mx < x1 and y0 < my < y1:           return HIT_MOVE
+        return HIT_NONE
+
+    def _cursor_for_hit(self, hit):
+        m = {
+            HIT_TL: Qt.SizeFDiagCursor, HIT_BR: Qt.SizeFDiagCursor,
+            HIT_TR: Qt.SizeBDiagCursor, HIT_BL: Qt.SizeBDiagCursor,
+            HIT_T:  Qt.SizeVerCursor,   HIT_B:  Qt.SizeVerCursor,
+            HIT_L:  Qt.SizeHorCursor,   HIT_R:  Qt.SizeHorCursor,
+            HIT_MOVE: Qt.SizeAllCursor,
+        }
+        return m.get(hit, Qt.ArrowCursor)
+
+    # ── 裁剪框局限 ──
+    def _clamp_box(self):
+        iw, ih = self._orig.size
+        MIN_SZ = 20.0
+        self._cx0 = max(0.0, min(self._cx0, self._cx1 - MIN_SZ))
+        self._cy0 = max(0.0, min(self._cy0, self._cy1 - MIN_SZ))
+        self._cx1 = min(float(iw), max(self._cx1, self._cx0 + MIN_SZ))
+        self._cy1 = min(float(ih), max(self._cy1, self._cy0 + MIN_SZ))
+
+    # ── 公共接口 ──
     def get_cropped(self) -> Image.Image:
-        """返回当前裁剪结果（PIL Image）"""
-        rect = self._crop_rect()
-        if rect:
-            return self._orig.crop(rect)
-        return self._orig.copy()
+        self._clamp_box()
+        box = (int(self._cx0), int(self._cy0),
+               int(self._cx1), int(self._cy1))
+        return self._orig.crop(box)
 
+    def reset(self):
+        iw, ih = self._orig.size
+        self._cx0, self._cy0 = 0.0, 0.0
+        self._cx1, self._cy1 = float(iw), float(ih)
+        self.update()
+
+    # ── 绘制 ──
     def paintEvent(self, e):
-        rect = self._crop_rect()
-        if not rect:
+        from PyQt5.QtCore import QRectF
+        iw, ih = self._orig.size
+        wx0, wy0, wx1, wy1, _ = self._img_rect_on_widget()
+
+        # 缩略图展示
+        thumb = self._orig.resize(
+            (int(wx1 - wx0), int(wy1 - wy0)), Image.LANCZOS)
+        px = pil_to_qpixmap(thumb)
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+        # 画布背景
+        p.fillRect(self.rect(), QColor(C['preview']))
+        # 图片
+        p.drawPixmap(int(wx0), int(wy0), px)
+
+        # 裁剪框坐标
+        bx0, by0, bx1, by1 = self._crop_box_widget()
+
+        # 遗罩阴影（框外半透明黑色）
+        overlay = QColor(0, 0, 0, 120)
+        p.fillRect(QRectF(wx0, wy0, wx1 - wx0, by0 - wy0), overlay)   # 上
+        p.fillRect(QRectF(wx0, by1, wx1 - wx0, wy1 - by1), overlay)   # 下
+        p.fillRect(QRectF(wx0, by0, bx0 - wx0, by1 - by0), overlay)   # 左
+        p.fillRect(QRectF(bx1, by0, wx1 - bx1, by1 - by0), overlay)   # 右
+
+        # 裁剪框边框
+        p.setPen(QColor(255, 255, 255, 220))
+        p.drawRect(QRectF(bx0, by0, bx1 - bx0, by1 - by0))
+
+        # 三等分网格（如 PS）
+        p.setPen(QColor(255, 255, 255, 60))
+        for i in (1, 2):
+            gx = bx0 + (bx1 - bx0) * i / 3
+            gy = by0 + (by1 - by0) * i / 3
+            p.drawLine(int(gx), int(by0), int(gx), int(by1))
+            p.drawLine(int(bx0), int(gy), int(bx1), int(gy))
+
+        # 控制点（白色实心正方形）
+        p.setPen(QColor(255, 255, 255, 255))
+        p.setBrush(QColor(255, 255, 255, 220))
+        cx = (bx0 + bx1) / 2
+        cy = (by0 + by1) / 2
+        r  = HANDLE_R
+        for hx, hy in [
+            (bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1),  # 四角
+            (cx,  by0), (cx,  by1), (bx0, cy),  (bx1, cy),   # 四边中点
+        ]:
+            p.drawRect(QRectF(hx - r, hy - r, r * 2, r * 2))
+
+        # 提示文字
+        p.setPen(QColor(255, 255, 255, 100))
+        p.setFont(QFont("Arial", 9))
+        p.drawText(self.rect().adjusted(0, 0, -8, -6),
+                   Qt.AlignBottom | Qt.AlignRight,
+                   "拖动框内移动  ·  拖角等比  ·  拖边自由")
+        p.end()
+
+    # ── 鼠标事件 ──
+    def mouseMoveEvent(self, e):
+        mx, my = e.pos().x(), e.pos().y()
+        if self._hit == HIT_NONE:
+            hit = self._hit_test(mx, my)
+            self.setCursor(self._cursor_for_hit(hit))
             return
-        x0, y0, x1, y1 = rect
-        cropped = self._orig.crop((x0, y0, x1, y1))
-        display = cropped.resize((self.width(), self.height()), Image.LANCZOS)
-        px = pil_to_qpixmap(display)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.drawPixmap(0, 0, px)
-        # 操作提示
-        painter.setPen(QColor(255, 255, 255, 130))
-        painter.setFont(QFont("Arial", 9))
-        painter.drawText(self.rect().adjusted(0, 0, -8, -6),
-                         Qt.AlignBottom | Qt.AlignRight,
-                         "拖动移位  ·  滚轮缩放")
-        painter.end()
+
+        dx_w = mx - self._drag_start[0]
+        dy_w = my - self._drag_start[1]
+        _, _, _, _, scale = self._img_rect_on_widget()
+        dx = dx_w / scale
+        dy = dy_w / scale
+        cx0, cy0, cx1, cy1 = self._drag_box
+        iw, ih = self._orig.size
+
+        if self._hit == HIT_MOVE:
+            w = cx1 - cx0; h = cy1 - cy0
+            nx0 = max(0.0, min(cx0 + dx, iw - w))
+            ny0 = max(0.0, min(cy0 + dy, ih - h))
+            self._cx0, self._cy0 = nx0, ny0
+            self._cx1, self._cy1 = nx0 + w, ny0 + h
+
+        elif self._hit == HIT_TL:
+            # 等比：以右下角为锁定点
+            d = (dx - dy) / 2
+            self._cx0 = max(0.0, min(cx0 + dx, cx1 - 20))
+            self._cy0 = max(0.0, min(cy0 + dy, cy1 - 20))
+
+        elif self._hit == HIT_TR:
+            self._cx1 = min(float(iw), max(cx1 + dx, cx0 + 20))
+            self._cy0 = max(0.0, min(cy0 + dy, cy1 - 20))
+
+        elif self._hit == HIT_BL:
+            self._cx0 = max(0.0, min(cx0 + dx, cx1 - 20))
+            self._cy1 = min(float(ih), max(cy1 + dy, cy0 + 20))
+
+        elif self._hit == HIT_BR:
+            self._cx1 = min(float(iw), max(cx1 + dx, cx0 + 20))
+            self._cy1 = min(float(ih), max(cy1 + dy, cy0 + 20))
+
+        elif self._hit == HIT_T:
+            self._cy0 = max(0.0, min(cy0 + dy, cy1 - 20))
+
+        elif self._hit == HIT_B:
+            self._cy1 = min(float(ih), max(cy1 + dy, cy0 + 20))
+
+        elif self._hit == HIT_L:
+            self._cx0 = max(0.0, min(cx0 + dx, cx1 - 20))
+
+        elif self._hit == HIT_R:
+            self._cx1 = min(float(iw), max(cx1 + dx, cx0 + 20))
+
+        self.update()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self.setCursor(Qt.ClosedHandCursor)
-            self._drag    = e.pos()
-            self._drag_ox = self._ox
-            self._drag_oy = self._oy
-
-    def mouseMoveEvent(self, e):
-        if self._drag is None:
+        if e.button() != Qt.LeftButton:
             return
-        dx = e.pos().x() - self._drag.x()
-        dy = e.pos().y() - self._drag.y()
-        rect = self._crop_rect()
-        if rect:
-            x0, y0, x1, y1 = rect
-            ratio_x = (x1 - x0) / max(self.width(), 1)
-            ratio_y = (y1 - y0) / max(self.height(), 1)
-            self._ox = self._drag_ox - dx * ratio_x
-            self._oy = self._drag_oy - dy * ratio_y
-        self.update()
+        mx, my = e.pos().x(), e.pos().y()
+        self._hit = self._hit_test(mx, my)
+        if self._hit != HIT_NONE:
+            self._drag_start = (mx, my)
+            self._drag_box   = (self._cx0, self._cy0, self._cx1, self._cy1)
+            self.setCursor(self._cursor_for_hit(self._hit))
 
     def mouseReleaseEvent(self, e):
-        self._drag = None
-        self.setCursor(Qt.OpenHandCursor)
-
-    def wheelEvent(self, e):
-        delta = e.angleDelta().y()
-        factor = 1.08 if delta > 0 else 0.93
-        self._scale = max(0.5, min(5.0, self._scale * factor))
-        self.update()
+        if e.button() == Qt.LeftButton:
+            self._hit = HIT_NONE
+            self._drag_start = None
+            self._drag_box   = None
+            # 恢复光标
+            hit = self._hit_test(e.pos().x(), e.pos().y())
+            self.setCursor(self._cursor_for_hit(hit))
 
 
 class CropDialog(QDialog):
-    """裁剪调整弹窗"""
+    """裁剪调整弹窗（PS 风格）"""
     def __init__(self, pil_img: Image.Image, parent=None):
         super().__init__(parent)
         self.setWindowTitle("调整裁剪区域")
         self.setModal(True)
-        self.setMinimumSize(520, 480)
+        self.setMinimumSize(600, 520)
         self.setStyleSheet(f"""
             QDialog {{
                 background:{C['panel']};
-                border-radius:12px;
-            }}
-            QDialogButtonBox QPushButton {{
-                min-width:90px;
-                min-height:34px;
-                border-radius:8px;
-                font-size:13px;
-                font-weight:600;
             }}
         """)
 
         lo = QVBoxLayout(self)
-        lo.setContentsMargins(20, 20, 20, 16)
-        lo.setSpacing(12)
+        lo.setContentsMargins(20, 16, 20, 16)
+        lo.setSpacing(10)
 
-        tip = QLabel("拖动照片调整位置，滚轮缩放，确认后应用到排版")
+        tip = QLabel("拖动框内移动裁剪框  ·  拖动四角等比缩放  ·  拖动四边自由拉伸")
         tip.setStyleSheet(f"font-size:11px;color:{C['text2']};")
         lo.addWidget(tip)
 
         self.canvas = CropCanvas(pil_img)
         lo.addWidget(self.canvas, 1)
 
-        # 重置按钮
-        reset_btn = QPushButton("重置")
+        reset_btn = QPushButton("重置裁剪框")
+        reset_btn.setFixedHeight(34)
         reset_btn.setStyleSheet(f"""
             QPushButton {{
                 background:{C['card']};
                 color:{C['text2']};
                 border:1px solid {C['border']};
                 border-radius:8px;
-                min-width:80px;
-                min-height:34px;
+                min-width:100px;
                 font-size:13px;
             }}
             QPushButton:hover {{ background:{C['card_hover']}; }}
         """)
-        reset_btn.clicked.connect(self._reset)
+        reset_btn.clicked.connect(self.canvas.reset)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.setStyleSheet(f"""
+        ok_btn = btns.button(QDialogButtonBox.Ok)
+        ok_btn.setText("应用裁剪")
+        cancel_btn = btns.button(QDialogButtonBox.Cancel)
+        cancel_btn.setText("取消")
+        for btn in [ok_btn, cancel_btn]:
+            btn.setFixedHeight(34)
+            btn.setMinimumWidth(90)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                        stop:0 {C['accent']},stop:1 {C['accent2']});
+                    color:#fff;
+                    border:none;
+                    border-radius:8px;
+                    font-size:13px;
+                    font-weight:600;
+                }}
+            """)
+        cancel_btn.setStyleSheet(f"""
             QPushButton {{
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {C['accent']},stop:1 {C['accent2']});
-                color:#fff;
-                border:none;
-            }}
-            QPushButton[text='Cancel'] {{
                 background:{C['card']};
                 color:{C['text2']};
                 border:1px solid {C['border']};
+                border-radius:8px;
+                font-size:13px;
+                min-width:90px;
             }}
-            QPushButton[text='Cancel']:hover {{ background:{C['card_hover']}; }}
+            QPushButton:hover {{ background:{C['card_hover']}; }}
         """)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -235,13 +403,6 @@ class CropDialog(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(btns)
         lo.addLayout(btn_row)
-
-    def _reset(self):
-        iw, ih = self.canvas._orig.size
-        self.canvas._scale = 1.0
-        self.canvas._ox = iw / 2.0
-        self.canvas._oy = ih / 2.0
-        self.canvas.update()
 
     def get_cropped(self) -> Image.Image:
         return self.canvas.get_cropped()
