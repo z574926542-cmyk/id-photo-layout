@@ -1,0 +1,219 @@
+name: 打包发布 - Windows & macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  # ─────────────────────────────────────────
+  # Windows：打包为单文件 .exe
+  # ─────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install Pillow PyQt5 pyinstaller onnxruntime numpy
+
+      - name: 下载 u2net.onnx 模型
+        run: |
+          $url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
+          Invoke-WebRequest -Uri $url -OutFile "u2net.onnx"
+          Write-Host "模型下载完成"
+        shell: pwsh
+
+      - name: 打包为 .exe（单文件）
+        run: |
+          pyinstaller main.py `
+            --name "IDPhotoTool" `
+            --windowed `
+            --onefile `
+            --icon "icon.ico" `
+            --add-data "layout_engine.py;." `
+            --add-data "u2net_engine.py;." `
+            --add-data "u2net.onnx;." `
+            --add-data "icon.ico;." `
+            --add-data "icon.png;." `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageDraw `
+            --hidden-import PyQt5 `
+            --hidden-import PyQt5.QtWidgets `
+            --hidden-import PyQt5.QtCore `
+            --hidden-import PyQt5.QtGui `
+            --hidden-import onnxruntime `
+            --hidden-import numpy `
+            --clean --noconfirm
+        shell: pwsh
+
+      - name: 上传 Windows 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/IDPhotoTool.exe
+
+  # ─────────────────────────────────────────
+  # macOS：打包为 .app 再制作 .dmg
+  # ─────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          pip install Pillow PyQt5 pyinstaller onnxruntime numpy
+          brew install create-dmg
+
+      - name: 下载 u2net.onnx 模型
+        run: |
+          curl -L "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx" -o u2net.onnx
+          echo "模型大小: $(du -sh u2net.onnx)"
+
+      - name: 将 icon.png 转换为 icns（macOS 图标）
+        run: |
+          mkdir -p icon.iconset
+          sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   icon.png --out icon.iconset/icon_512x512.png
+          iconutil -c icns icon.iconset -o icon.icns
+          echo "✓ icon.icns 生成完成"
+
+      - name: 打包为 .app
+        run: |
+          pyinstaller main.py \
+            --name "IDPhotoTool" \
+            --windowed \
+            --onedir \
+            --icon "icon.icns" \
+            --add-data "layout_engine.py:." \
+            --add-data "u2net_engine.py:." \
+            --add-data "u2net.onnx:." \
+            --add-data "icon.icns:." \
+            --add-data "icon.png:." \
+            --hidden-import PIL \
+            --hidden-import PIL.Image \
+            --hidden-import PIL.ImageDraw \
+            --hidden-import PyQt5 \
+            --hidden-import PyQt5.QtWidgets \
+            --hidden-import PyQt5.QtCore \
+            --hidden-import PyQt5.QtGui \
+            --hidden-import onnxruntime \
+            --hidden-import numpy \
+            --clean --noconfirm
+
+      - name: 制作 .dmg 安装包
+        run: |
+          mkdir -p dmg_staging
+          cp -r "dist/IDPhotoTool.app" dmg_staging/
+          create-dmg \
+            --volname "证件照处理工具" \
+            --volicon "icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 120 \
+            --icon "IDPhotoTool.app" 175 190 \
+            --hide-extension "IDPhotoTool.app" \
+            --app-drop-link 425 190 \
+            "IDPhotoTool-macOS.dmg" \
+            dmg_staging/ \
+          || \
+          create-dmg \
+            --volname "证件照处理工具" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 120 \
+            --icon "IDPhotoTool.app" 175 190 \
+            --hide-extension "IDPhotoTool.app" \
+            --app-drop-link 425 190 \
+            "IDPhotoTool-macOS.dmg" \
+            dmg_staging/
+
+      - name: 上传 macOS 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: IDPhotoTool-macOS.dmg
+
+  # ─────────────────────────────────────────
+  # 发布 Release
+  # ─────────────────────────────────────────
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载 Windows 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: artifacts/
+
+      - name: 下载 macOS 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: artifacts/
+
+      - name: 列出产物
+        run: ls -lh artifacts/
+
+      - name: 重命名文件
+        run: |
+          mv artifacts/IDPhotoTool.exe artifacts/IDPhotoTool-Windows.exe || true
+          ls -lh artifacts/
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 证件照处理工具 ${{ github.ref_name }}
+          body: |
+            ## 证件照处理工具 ${{ github.ref_name }}
+
+            ### 新功能（v10.0）
+            - 🎨 **换背景功能**：内置 U²-Net AI 模型，本地自动抠图，无需联网
+            - 🖼️ 支持红/蓝/白/绿/灰/自定义颜色背景
+            - 🌅 支持上传自定义背景图片
+            - 📐 换背景后直接选排版，一键生成排版图
+            - 💾 可导出换背景 JPG / 透明 PNG / 排版 JPG（300 DPI）
+
+            ### 排版功能
+            - 一寸 / 二寸 / 小二寸 / 三寸 / 驾驶证 / 一寸+二寸混排 / 结婚照
+            - PS 风格裁剪框（四角等比 / 四边自由拉伸）
+            - 等比填满 + 居中裁剪，自动方向检测，深灰描边
+
+            ### 下载安装
+            | 系统 | 文件 | 说明 |
+            |------|------|------|
+            | Windows | `IDPhotoTool-Windows.exe` | 双击直接运行，无需安装 |
+            | macOS | `IDPhotoTool-macOS.dmg` | 打开后将 App 拖入 Applications |
+
+            > 完全本地运行，不联网，不上传任何图片
+          files: |
+            artifacts/IDPhotoTool-Windows.exe
+            artifacts/IDPhotoTool-macOS.dmg
+          draft: false
+          prerelease: false
