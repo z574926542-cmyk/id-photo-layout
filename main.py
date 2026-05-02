@@ -617,7 +617,7 @@ class StatusLabel(QLabel):
 class App(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("证件照处理工具")
+        self.setWindowTitle("证件照排版工具")
         self.resize(1280, 820)
         self.setMinimumSize(1000, 680)
         _ico = Path(__file__).parent / "icon.ico"
@@ -666,7 +666,7 @@ class App(QMainWindow):
         ll.setSpacing(14)
 
         # 品牌
-        brand = QLabel("证件照处理工具")
+        brand = QLabel("证件照排版工具")
         brand.setStyleSheet(f"font-size:18px;font-weight:700;color:{C['text']};letter-spacing:1px;")
         sub = QLabel("换背景  ·  自动排版  ·  本地离线")
         sub.setStyleSheet(f"font-size:9px;color:{C['muted']};letter-spacing:2px;margin-top:-4px;")
@@ -892,13 +892,25 @@ class App(QMainWindow):
         # 启动抠图
         self._start_remove_bg()
 
+    def _stop_worker(self, worker):
+        """安全停止并销毁 QThread，防止 macOS 崩溃"""
+        if worker is not None:
+            try:
+                worker.quit()
+                worker.wait(3000)  # 最多等 3 秒
+            except Exception:
+                pass
+        return None
+
     def _start_remove_bg(self):
         if self._src_img is None: return
+        self._rm_worker = self._stop_worker(self._rm_worker)
         self.rm_prog.setVisible(True)
         self.rm_status.set_info("正在抠图（U²-Net）...")
         self._rm_worker = RemoveBgWorker(self._src_img)
         self._rm_worker.done.connect(self._on_rm_done)
         self._rm_worker.fail.connect(self._on_rm_fail)
+        self._rm_worker.finished.connect(self._rm_worker.deleteLater)
         self._rm_worker.start()
 
     def _on_rm_done(self, rgba: Image.Image):
@@ -1011,9 +1023,11 @@ class App(QMainWindow):
         self.ly_prog.setVisible(True)
         self.btn_exp_layout.setEnabled(False)
         self.pinfo.set_info("排版生成中...")
+        self._ly_worker = self._stop_worker(self._ly_worker)
         self._ly_worker = LayoutWorker(src, name)
         self._ly_worker.done.connect(self._on_ly_done)
         self._ly_worker.fail.connect(self._on_ly_fail)
+        self._ly_worker.finished.connect(self._ly_worker.deleteLater)
         self._ly_worker.start()
 
     def _on_ly_done(self, img: Image.Image, name: str):
@@ -1066,12 +1080,17 @@ class App(QMainWindow):
                 QMessageBox.critical(self, "保存失败", str(e))
 
 
+    def closeEvent(self, event):
+        """关闭窗口时确保所有后台线程安全退出"""
+        self._rm_worker = self._stop_worker(self._rm_worker)
+        self._ly_worker = self._stop_worker(self._ly_worker)
+        event.accept()
 # ─────────────────────────────────────────────
 # 入口
 # ─────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("证件照处理工具")
+    app.setApplicationName("证件照排版工具")
     app.setStyle("Fusion")
 
     _icon_path = Path(__file__).parent / "icon.ico"

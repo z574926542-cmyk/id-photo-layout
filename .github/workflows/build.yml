@@ -128,7 +128,7 @@ jobs:
           mkdir -p dmg_staging
           cp -r "dist/IDPhotoTool.app" dmg_staging/
           create-dmg \
-            --volname "证件照处理工具" \
+            --volname "证件照排版工具" \
             --volicon "icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
@@ -140,7 +140,7 @@ jobs:
             dmg_staging/ \
           || \
           create-dmg \
-            --volname "证件照处理工具" \
+            --volname "证件照排版工具" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 120 \
@@ -189,9 +189,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: 证件照处理工具 ${{ github.ref_name }}
+          name: 证件照排版工具 ${{ github.ref_name }}
           body: |
-            ## 证件照处理工具 ${{ github.ref_name }}
+            ## 证件照排版工具 ${{ github.ref_name }}
 
             ### 新功能（v10.0）
             - 🎨 **换背景功能**：内置 U²-Net AI 模型，本地自动抠图，无需联网
