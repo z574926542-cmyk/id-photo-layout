@@ -1,5 +1,5 @@
 """
-证件照排版工具 v12.0
+证件照便捷工具 v12.0
 功能：AI抠图换背景 + 多规格排版 + 画笔修复 + PS风格裁剪框 + JPG导出
 """
 from __future__ import annotations
@@ -457,7 +457,7 @@ class LayoutWorker(QThread):
 class App(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("证件照排版工具")
+        self.setWindowTitle("证件照便捷工具")
         self.resize(1360,860); self.setMinimumSize(1100,700)
         _ico=Path(__file__).parent/"icon.ico"
         if not _ico.exists(): _ico=Path(__file__).parent/"icon.png"
@@ -478,7 +478,7 @@ class App(QMainWindow):
         left.setStyleSheet(f"background:{C['panel']};border-right:1px solid {C['border']};")
         ll=QVBoxLayout(left); ll.setContentsMargins(14,14,14,14); ll.setSpacing(7)
 
-        title=QLabel("证件照排版工具")
+        title=QLabel("证件照便捷工具")
         title.setStyleSheet(f"font-size:14px;font-weight:700;color:{C['text']};letter-spacing:0.5px;padding-bottom:2px;")
         ll.addWidget(title); ll.addWidget(divider())
 
@@ -741,7 +741,7 @@ class App(QMainWindow):
 # ─────────────────────────────────────────────
 def main():
     app=QApplication(sys.argv)
-    app.setApplicationName("证件照排版工具")
+    app.setApplicationName("证件照便捷工具")
     app.setStyle("Fusion")
     _ip=Path(__file__).parent/"icon.ico"
     if not _ip.exists(): _ip=Path(__file__).parent/"icon.png"

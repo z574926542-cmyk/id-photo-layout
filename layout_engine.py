@@ -147,6 +147,13 @@ def place_grid(canvas: Image.Image, photo: Image.Image,
 
 def generate_layout(img: Image.Image, template_name: str) -> Image.Image:
     """根据模板名称生成排版图片，返回 PIL Image。"""
+    # 关键修复：如果是 RGBA（抠图结果），先合成白色背景转为 RGB，避免 paste 崩溃
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
     if template_name not in TEMPLATES:
         raise ValueError(f"未知排版类型：{template_name}")
 

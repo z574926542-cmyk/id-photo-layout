@@ -24,11 +24,11 @@ jobs:
       - name: 安装依赖
         run: pip install Pillow PyQt5 pyinstaller onnxruntime numpy
 
-      - name: 下载 u2net.onnx 模型
+      - name: 下载 rmbg.onnx 模型（RMBG-1.4，更好的人像边缘）
         run: |
-          $url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
-          Invoke-WebRequest -Uri $url -OutFile "u2net.onnx"
-          Write-Host "模型下载完成"
+          $url = "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx"
+          Invoke-WebRequest -Uri $url -OutFile "rmbg.onnx"
+          Write-Host "模型大小: $((Get-Item rmbg.onnx).length / 1MB) MB"
         shell: pwsh
 
       - name: 打包为 .exe（单文件）
@@ -40,7 +40,7 @@ jobs:
             --icon "icon.ico" `
             --add-data "layout_engine.py;." `
             --add-data "u2net_engine.py;." `
-            --add-data "u2net.onnx;." `
+            --add-data "rmbg.onnx;." `
             --add-data "icon.ico;." `
             --add-data "icon.png;." `
             --hidden-import PIL `
@@ -80,10 +80,10 @@ jobs:
           pip install Pillow PyQt5 pyinstaller onnxruntime numpy
           brew install create-dmg
 
-      - name: 下载 u2net.onnx 模型
+      - name: 下载 rmbg.onnx 模型（RMBG-1.4，更好的人像边缘）
         run: |
-          curl -L "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx" -o u2net.onnx
-          echo "模型大小: $(du -sh u2net.onnx)"
+          curl -L "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx" -o rmbg.onnx
+          echo "模型大小: $(du -sh rmbg.onnx)"
 
       - name: 将 icon.png 转换为 icns（macOS 图标）
         run: |
@@ -109,7 +109,7 @@ jobs:
             --icon "icon.icns" \
             --add-data "layout_engine.py:." \
             --add-data "u2net_engine.py:." \
-            --add-data "u2net.onnx:." \
+            --add-data "rmbg.onnx:." \
             --add-data "icon.icns:." \
             --add-data "icon.png:." \
             --hidden-import PIL \
@@ -128,7 +128,7 @@ jobs:
           mkdir -p dmg_staging
           cp -r "dist/IDPhotoTool.app" dmg_staging/
           create-dmg \
-            --volname "证件照处理工具" \
+            --volname "证件照便捷工具" \
             --volicon "icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
@@ -140,7 +140,7 @@ jobs:
             dmg_staging/ \
           || \
           create-dmg \
-            --volname "证件照处理工具" \
+            --volname "证件照便捷工具" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 120 \
@@ -189,12 +189,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: 证件照处理工具 ${{ github.ref_name }}
+          name: 证件照便捷工具 ${{ github.ref_name }}
           body: |
-            ## 证件照处理工具 ${{ github.ref_name }}
+            ## 证件照便捷工具 ${{ github.ref_name }}
 
             ### 新功能（v10.0）
-            - 🎨 **换背景功能**：内置 U²-Net AI 模型，本地自动抠图，无需联网
+            - 🎨 **换背景功能**：内置 RMBG-1.4 AI 模型，本地自动抠图，无需联网，毛发边缘更精细
             - 🖼️ 支持红/蓝/白/绿/灰/自定义颜色背景
             - 🌅 支持上传自定义背景图片
             - 📐 换背景后直接选排版，一键生成排版图
