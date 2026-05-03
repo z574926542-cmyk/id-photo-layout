@@ -633,11 +633,19 @@ class IdPhotoModule(QWidget):
         self.bg_status = StatusLabel("当前：白色背景")
         ll.addWidget(self.bg_status)
         ll.addWidget(divider())
-
         # 排版模板
         ll.addWidget(section_label("排版模板"))
-        tmpls = ["一寸排版", "二寸排版", "小二寸排版", "三寸排版",
-                 "驾驶证排版", "一寸+二寸排版", "结婚照排版"]
+        # 模板名称 -> 副标题备注
+        TMPL_INFO = {
+            "一寸排版":      "3×3 · 9张 · 5寸竖版",
+            "二寸排版":      "2×2 · 4张 · 5寸竖版",
+            "小二寸排版":    "2×2 · 4张 · 5寸竖版",
+            "三寸排版":      "1×2 · 2张 · 5寸竖版",
+            "驾驶证排版":    "5×2 · 10张 · 5寸横版",
+            "一寸+二寸排版": "9+4张 · 7寸横版",
+            "结婚照排版":    "2×2 · 4张 · 5寸横版",
+        }
+        tmpls = list(TMPL_INFO.keys())
         self._btns = {}
         tmpl_grid = QWidget()
         tgl = QVBoxLayout(tmpl_grid)
@@ -649,20 +657,59 @@ class IdPhotoModule(QWidget):
                 row = QHBoxLayout()
                 row.setSpacing(4)
                 tgl.addLayout(row)
-            b = QPushButton(name)
+            # 卡片式按钮：主标题 + 副标题
+            card = QWidget()
+            card.setObjectName(f"tmpl_card_{i}")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(6, 6, 6, 6)
+            card_layout.setSpacing(2)
+            title_lbl = QLabel(name)
+            title_lbl.setAlignment(Qt.AlignCenter)
+            title_lbl.setStyleSheet(f"color:{C['text']};font-size:12px;font-weight:bold;background:transparent;border:none;")
+            sub_lbl = QLabel(TMPL_INFO[name])
+            sub_lbl.setAlignment(Qt.AlignCenter)
+            sub_lbl.setStyleSheet(f"color:{C['text2']};font-size:10px;background:transparent;border:none;")
+            card_layout.addWidget(title_lbl)
+            card_layout.addWidget(sub_lbl)
+            # 用 QPushButton 做可点击背景
+            b = QPushButton()
             b.setCheckable(True)
-            b.setFixedHeight(30)
+            b.setFixedHeight(52)
             b.setStyleSheet(
-                f"QPushButton{{background:{C['card']};color:{C['text2']};"
-                f"border:1px solid {C['border']};border-radius:6px;font-size:11px;padding:0 8px;}}"
-                f"QPushButton:checked{{background:{C['accent']};color:#fff;border-color:{C['accent']};}}")
+                f"QPushButton{{background:{C['card']};border:1px solid {C['border']};border-radius:6px;}}"
+                f"QPushButton:hover{{border-color:{C['text2']};}}"
+                f"QPushButton:checked{{background:{C['accent']};border-color:{C['accent']};}}"
+            )
             b.clicked.connect(lambda checked, n=name: self._on_tmpl(n))
             self._btns[name] = b
+            # 将卡片叠加在按钮上（通过父子关系）
+            overlay = QWidget(b)
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            ov_layout = QVBoxLayout(overlay)
+            ov_layout.setContentsMargins(6, 6, 6, 6)
+            ov_layout.setSpacing(2)
+            t2 = QLabel(name)
+            t2.setAlignment(Qt.AlignCenter)
+            t2.setStyleSheet(f"color:{C['text']};font-size:12px;font-weight:bold;background:transparent;border:none;")
+            s2 = QLabel(TMPL_INFO[name])
+            s2.setAlignment(Qt.AlignCenter)
+            s2.setStyleSheet(f"color:{C['text2']};font-size:10px;background:transparent;border:none;")
+            ov_layout.addWidget(t2)
+            ov_layout.addWidget(s2)
+            # 选中时更新文字颜色
+            def _update_labels(checked, btn=b, lbl_title=t2, lbl_sub=s2):
+                if checked:
+                    lbl_title.setStyleSheet(f"color:#fff;font-size:12px;font-weight:bold;background:transparent;border:none;")
+                    lbl_sub.setStyleSheet(f"color:rgba(255,255,255,180);font-size:10px;background:transparent;border:none;")
+                else:
+                    lbl_title.setStyleSheet(f"color:{C['text']};font-size:12px;font-weight:bold;background:transparent;border:none;")
+                    lbl_sub.setStyleSheet(f"color:{C['text2']};font-size:10px;background:transparent;border:none;")
+            b.toggled.connect(_update_labels)
+            b.resizeEvent = lambda e, ov=overlay: ov.setGeometry(0, 0, e.size().width(), e.size().height())
             row.addWidget(b)
         if len(tmpls) % 2 == 1:
             row.addStretch()
         ll.addWidget(tmpl_grid)
-
         self.ly_prog = QProgressBar()
         self.ly_prog.setRange(0, 0)
         self.ly_prog.setFixedHeight(4)
