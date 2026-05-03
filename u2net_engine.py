@@ -1,11 +1,11 @@
 """
-抠图引擎 v2.0 - 使用 RMBG-1.4 模型（BriaAI）
-相比 U²-Net 的优势：
-  - 输入分辨率 1024×1024（vs 320×320），边缘更精细
-  - 专为人像/前景分割设计，毛发处理更干净
-  - 后处理：高斯模糊软化边缘 + S型曲线增强
+抠图引擎 v3.0 - MODNet（Trimap-Free Portrait Matting）
+相比 RMBG-1.4 的优势：
+  - Matting 模型，输出真正的 Alpha 软边（非硬分割）
+  - 发丝、半透明边缘精细处理
+  - 模型体积仅 ~25MB（vs RMBG 的 176MB）
   - 完全离线，ONNX 推理
-模型文件：rmbg.onnx（约 176MB）
+模型文件：modnet.onnx
 """
 from __future__ import annotations
 import os
@@ -13,9 +13,10 @@ import sys
 import numpy as np
 from PIL import Image, ImageFilter
 
-# ─── 全局 session 懒加载 ───
 _session = None
-_MODEL_FILENAME = "rmbg.onnx"
+_MODEL_FILENAME = "modnet.onnx"
+_REF_SIZE = 512
+
 
 def _get_model_path() -> str:
     if getattr(sys, "frozen", False):
@@ -23,6 +24,7 @@ def _get_model_path() -> str:
     else:
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, _MODEL_FILENAME)
+
 
 def _get_session():
     global _session
@@ -32,7 +34,7 @@ def _get_session():
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"找不到模型文件: {model_path}\n"
-                f"请确保 rmbg.onnx 与程序在同一目录"
+                f"请确保 modnet.onnx 与程序在同一目录"
             )
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 4
@@ -45,64 +47,77 @@ def _get_session():
         )
     return _session
 
-# ─── RMBG-1.4 预处理参数 ───
-_RMBG_SIZE = 1024
-_RMBG_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-_RMBG_STD  = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+
+def _get_scale_factor(im_h: int, im_w: int, ref_size: int):
+    if max(im_h, im_w) < ref_size or min(im_h, im_w) > ref_size:
+        if im_w >= im_h:
+            im_rh = ref_size
+            im_rw = int(im_w / im_h * ref_size)
+        else:
+            im_rw = ref_size
+            im_rh = int(im_h / im_w * ref_size)
+    else:
+        im_rh = im_h
+        im_rw = im_w
+    im_rw = max(32, im_rw - im_rw % 32)
+    im_rh = max(32, im_rh - im_rh % 32)
+    return im_rw / im_w, im_rh / im_h
+
 
 def _preprocess(img: Image.Image):
     orig_size = img.size  # (W, H)
-    rgb = img.convert("RGB").resize((_RMBG_SIZE, _RMBG_SIZE), Image.BILINEAR)
-    arr = np.array(rgb, dtype=np.float32) / 255.0
-    arr = (arr - _RMBG_MEAN) / _RMBG_STD
-    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]  # (1, 3, 1024, 1024)
-    return arr.astype(np.float32), orig_size
+    rgb = img.convert("RGB")
+    arr = np.array(rgb, dtype=np.float32)
+    im_h, im_w = arr.shape[:2]
+    arr = (arr - 127.5) / 127.5
+    x_scale, y_scale = _get_scale_factor(im_h, im_w, _REF_SIZE)
+    new_w = int(im_w * x_scale)
+    new_h = int(im_h * y_scale)
+    # 缩放
+    tmp = ((arr * 127.5 + 127.5).clip(0, 255).astype(np.uint8))
+    arr_scaled = np.array(
+        Image.fromarray(tmp).resize((new_w, new_h), Image.LANCZOS),
+        dtype=np.float32
+    )
+    arr_scaled = (arr_scaled - 127.5) / 127.5
+    # (H,W,3) -> (1,3,H,W)
+    arr_scaled = arr_scaled.transpose(2, 0, 1)[np.newaxis, ...]
+    return arr_scaled.astype(np.float32), orig_size
 
-def _postprocess(pred: np.ndarray, orig_size) -> Image.Image:
-    # pred shape: (1, 1, H, W) 或 (1, H, W) 或 (H, W)
+
+def _postprocess(pred: np.ndarray, orig_wh: tuple) -> Image.Image:
     if pred.ndim == 4:
-        mask = pred[0, 0]
+        matte = pred[0, 0]
     elif pred.ndim == 3:
-        mask = pred[0]
+        matte = pred[0]
     else:
-        mask = pred
-
-    # 归一化到 [0, 255]
-    mn, mx = float(mask.min()), float(mask.max())
+        matte = pred
+    mn, mx = float(matte.min()), float(matte.max())
     if mx - mn > 1e-8:
-        mask = (mask - mn) / (mx - mn)
-    mask = (mask * 255).astype(np.uint8)
+        matte = (matte - mn) / (mx - mn)
+    matte = (matte * 255).clip(0, 255).astype(np.uint8)
+    matte_img = Image.fromarray(matte, mode="L")
+    matte_img = matte_img.resize(orig_wh, Image.LANCZOS)
+    matte_img = matte_img.filter(ImageFilter.GaussianBlur(radius=0.4))
+    return matte_img
 
-    # 还原到原始尺寸（LANCZOS 保留细节）
-    mask_img = Image.fromarray(mask, mode="L")
-    mask_img = mask_img.resize(orig_size, Image.LANCZOS)
-
-    # 轻微高斯模糊软化锯齿边缘
-    mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=0.6))
-
-    # S 型曲线：前景更实、背景更透、半透明边缘保留
-    arr = np.array(mask_img, dtype=np.float32)
-    arr = 255.0 / (1.0 + np.exp(-0.06 * (arr - 120.0)))
-    mask_img = Image.fromarray(arr.astype(np.uint8), mode="L")
-
-    return mask_img
 
 def remove_background(img: Image.Image) -> Image.Image:
     """
     对输入图像进行抠图，返回带 Alpha 通道的 RGBA 图像。
     Alpha=255 表示前景（人物），Alpha=0 表示背景。
-    使用 RMBG-1.4 模型，1024×1024 高分辨率推理，毛发边缘更精细。
     """
     session = _get_session()
     inp, orig_size = _preprocess(img)
-    input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: inp})
-    mask = _postprocess(outputs[0], orig_size)
-
+    input_name  = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    outputs = session.run([output_name], {input_name: inp})
+    matte = _postprocess(outputs[0], orig_size)
     rgba = img.convert("RGBA")
     r, g, b, _ = rgba.split()
-    rgba = Image.merge("RGBA", (r, g, b, mask))
+    rgba = Image.merge("RGBA", (r, g, b, matte))
     return rgba
+
 
 def compose_background(
     fg_rgba: Image.Image,
