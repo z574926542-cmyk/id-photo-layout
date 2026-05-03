@@ -503,7 +503,7 @@ class LayoutWorker(QThread):
 # ─────────────────────────────────────────────
 # 证件照功能主面板
 # ─────────────────────────────────────────────
-class IdPhotoModule(QWidget):
+class IDPhotoModule(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         # 状态变量
