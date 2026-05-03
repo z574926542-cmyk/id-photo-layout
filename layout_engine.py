@@ -136,6 +136,7 @@ def place_grid(canvas: Image.Image, photo: Image.Image,
             y = start_y + row * (photo_h + gap)
             p = photo.copy()
             p = add_border(p)
+            if p.mode != "RGB": p = p.convert("RGB")
             canvas.paste(p, (x, y))
 
     return canvas
@@ -147,6 +148,13 @@ def place_grid(canvas: Image.Image, photo: Image.Image,
 
 def generate_layout(img: Image.Image, template_name: str) -> Image.Image:
     """根据模板名称生成排版图片，返回 PIL Image。"""
+    # 关键修复：如果是 RGBA（抠图结果），先合成白色背景转为 RGB，避免 paste 崩溃
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
     if template_name not in TEMPLATES:
         raise ValueError(f"未知排版类型：{template_name}")
 
@@ -216,6 +224,7 @@ def _layout_3inch(img: Image.Image) -> Image.Image:
         y = start_y + row * (photo_h + gap)
         p = photo.copy()
         p = add_border(p)
+        if p.mode != "RGB": p = p.convert("RGB")
         canvas.paste(p, (x, y))
 
     return canvas
@@ -280,6 +289,7 @@ def _layout_mixed(img: Image.Image) -> Image.Image:
             y = start_y1 + row * (ph1 + gap)
             p = photo1.copy()
             p = add_border(p)
+            if p.mode != "RGB": p = p.convert("RGB")
             canvas.paste(p, (x, y))
 
     # 右块垂直居中
@@ -291,6 +301,7 @@ def _layout_mixed(img: Image.Image) -> Image.Image:
             y = start_y2 + row * (ph2 + gap)
             p = photo2.copy()
             p = add_border(p)
+            if p.mode != "RGB": p = p.convert("RGB")
             canvas.paste(p, (x, y))
 
     return canvas
