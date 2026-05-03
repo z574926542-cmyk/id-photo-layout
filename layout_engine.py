@@ -1,334 +1,335 @@
 """
-证件照排版引擎 v3.0
-核心逻辑：尺寸换算 → 缩放（等比不裁剪）→ 拼版 → 描边 → 导出
-
-缩放规则：
-  - 等比缩放到目标尺寸内（fit模式），不裁剪用户画面
-  - 多余区域用白色填充，照片居中放置在目标格子内
-
-驾驶证：
-  - 画布：5寸横版（1500×1050 px，即5英寸宽×3.5英寸高）
-  - 单张：2.2×3.2 cm
-  - 排列：5列×2行，共10张，整体居中
+layout_engine_v19.py — 证件照排版引擎（稳定版）
+修复：
+  - 三寸排版：改用 5寸横版画布（1500×1050），避免 photo_w>canvas_w 导致负坐标
+  - 所有 fit_photo 注释统一为 "cover 模式：等比缩放填满目标尺寸，居中裁剪"
+  - place_grid 中 paste 统一处理 RGBA 模式（传 mask 参数）
+  - generate_layout 入口强制转 RGB，防止 RGBA 图片进入排版流程
 """
-
-from PIL import Image, ImageDraw
+from PIL import Image
 
 # ─────────────────────────────────────────────
-# 常量定义
+# 常量（300 DPI 像素尺寸）
 # ─────────────────────────────────────────────
-DPI = 300
-CM_PER_INCH = 2.54
-
-def cm_to_px(cm: float) -> int:
-    """厘米 → 像素（300 DPI）"""
-    return round(cm * DPI / CM_PER_INCH)
-
-# 画布尺寸（像素）
-CANVAS_5INCH_V = (1050, 1500)   # 3.5×5 英寸竖版（宽×高）
-CANVAS_5INCH_H = (1500, 1050)   # 5×3.5 英寸横版（宽×高）—— 驾驶证用
-CANVAS_7INCH   = (2100, 1500)   # 7×5 英寸横版（混排用）
-
-# 证件照尺寸（厘米）→ 像素（宽×高）
+# 照片尺寸（宽×高，单位：px @ 300DPI）
 PHOTO_SIZES = {
-    "1inch":    (cm_to_px(2.5), cm_to_px(3.5)),   # 一寸：295×413
-    "2inch":    (cm_to_px(3.5), cm_to_px(5.0)),   # 二寸：413×591
-    "small2":  (cm_to_px(3.3), cm_to_px(4.5)),   # 小二寸：390×531
-    "3inch":   (cm_to_px(9.0), cm_to_px(6.0)),   # 三寸横排：1063×709
-    "driver":  (cm_to_px(2.2), cm_to_px(3.2)),   # 驾驶证：260×378
-    "wedding": (cm_to_px(5.0), cm_to_px(3.5)),   # 结婚照横版二寸：591×413
+    "一寸":   (295, 413),    # 25×35mm
+    "二寸":   (413, 579),    # 35×49mm
+    "小二寸": (413, 531),    # 35×45mm
+    "三寸":   (826, 1063),   # 70×90mm（注意：宽826，高1063）
+    "驾驶证": (216, 280),    # 18.3×23.8mm
+    "结婚照": (413, 579),    # 35×49mm（同二寸）
 }
 
-# 照片间距（px）
-PHOTO_GAP = 3
-
-# 描边参数
-BORDER_COLOR = (80, 80, 80)
-BORDER_WIDTH = 2
-
-# 排版模板定义
-TEMPLATES = {
-    "一寸排版":      "1inch_layout",
-    "二寸排版":      "2inch_layout",
-    "小二寸排版":    "small2_layout",
-    "三寸排版":      "3inch_layout",
-    "驾驶证排版":    "driver_layout",
-    "一寸+二寸排版": "mixed_layout",
-    "结婚照排版":    "wedding_layout",
+# 画布尺寸（宽×高，单位：px @ 300DPI）
+CANVAS_SIZES = {
+    "5寸竖版": (1050, 1500),  # 89×127mm
+    "5寸横版": (1500, 1050),  # 127×89mm
+    "7寸横版": (2100, 1500),  # 178×127mm
 }
 
-TEMPLATE_DESC = {
-    "一寸排版":      "3×3 共9张 · 5寸竖版",
-    "二寸排版":      "2×2 共4张 · 5寸竖版",
-    "小二寸排版":    "2×2 共4张 · 5寸竖版",
-    "三寸排版":      "1×2 共2张 · 5寸竖版",
-    "驾驶证排版":    "5×2 共10张 · 5寸横版",
-    "一寸+二寸排版": "一寸×9 + 二寸×4 · 7寸横版",
-    "结婚照排版":    "2×2 共4张 · 5寸横版",
-}
+GAP    = 9    # 照片间距 3px（实际 3px @ 300DPI = 约 0.25mm，这里用 9px 约 0.75mm）
+BORDER = 6    # 照片描边 2px（实际 6px @ 300DPI）
 
 # ─────────────────────────────────────────────
-# 核心工具函数
+# 辅助函数
 # ─────────────────────────────────────────────
-
-def fit_photo(img: Image.Image, target_w: int, target_h: int,
-              bg_color: tuple = (255, 255, 255)) -> Image.Image:
+def fit_photo(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     """
-    等比缩放填满目标尺寸（cover模式）：
-    - 等比缩放到恰好填满目标区域（scale = max）
-    - 超出部分从中心居中裁剪，裁剪量最小
-    - 照片完全铺满格子，无白边
+    cover 模式：等比缩放填满目标尺寸，居中裁剪。
+    保证输出图片尺寸精确为 target_w × target_h。
     """
-    iw, ih = img.size
-    # 计算等比缩放比例（保证填满目标区域，裁剪量最小）
-    scale = max(target_w / iw, target_h / ih)
-    new_w = round(iw * scale)
-    new_h = round(ih * scale)
-    resized = img.resize((new_w, new_h), Image.LANCZOS)
+    if target_w <= 0 or target_h <= 0:
+        raise ValueError(f"目标尺寸无效：{target_w}×{target_h}")
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError(f"源图片尺寸无效：{src_w}×{src_h}")
 
-    # 居中裁剪到目标尺寸
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # 居中裁剪
     left = (new_w - target_w) // 2
     top  = (new_h - target_h) // 2
-    return resized.crop((left, top, left + target_w, top + target_h))
-
-
-def add_border(img: Image.Image, border_w: int = BORDER_WIDTH,
-               color: tuple = BORDER_COLOR) -> Image.Image:
-    """在图片四周添加描边（绘制在图片边缘内侧，不扩大尺寸）。"""
-    draw = ImageDraw.Draw(img)
-    w, h = img.size
-    for i in range(border_w):
-        draw.rectangle([i, i, w - 1 - i, h - 1 - i], outline=color)
+    img  = img.crop((left, top, left + target_w, top + target_h))
     return img
 
 
-def create_canvas(canvas_size: tuple, bg_color: tuple = (255, 255, 255)) -> Image.Image:
-    """创建白色画布。"""
-    return Image.new("RGB", canvas_size, bg_color)
-
-
-def place_grid(canvas: Image.Image, photo: Image.Image,
-               cols: int, rows: int,
-               photo_w: int, photo_h: int,
-               gap: int = PHOTO_GAP,
-               offset_x: int = 0, offset_y: int = 0,
-               avail_w: int = None, avail_h: int = None) -> Image.Image:
-    """
-    将照片按 cols×rows 网格排列到画布的指定区域内，整体居中。
-    offset_x/offset_y：可用区域起始坐标
-    avail_w/avail_h：可用区域宽高（默认为画布全部）
-    """
-    cw, ch = canvas.size
-    if avail_w is None:
-        avail_w = cw - offset_x
-    if avail_h is None:
-        avail_h = ch - offset_y
-
-    block_w = cols * photo_w + (cols - 1) * gap
-    block_h = rows * photo_h + (rows - 1) * gap
-
-    start_x = offset_x + max(0, (avail_w - block_w) // 2)
-    start_y = offset_y + max(0, (avail_h - block_h) // 2)
-
-    for row in range(rows):
-        for col in range(cols):
-            x = start_x + col * (photo_w + gap)
-            y = start_y + row * (photo_h + gap)
-            p = photo.copy()
-            p = add_border(p)
-            if p.mode != "RGB": p = p.convert("RGB")
-            canvas.paste(p, (x, y))
-
+def add_border(img: Image.Image, border_px: int, color=(200, 200, 200)) -> Image.Image:
+    """在照片四周添加描边（不改变照片尺寸，在外部扩展）"""
+    if border_px <= 0:
+        return img
+    new_w = img.width  + border_px * 2
+    new_h = img.height + border_px * 2
+    canvas = Image.new("RGB", (new_w, new_h), color)
+    canvas.paste(img, (border_px, border_px))
     return canvas
 
 
+def create_canvas(w: int, h: int, bg=(255, 255, 255)) -> Image.Image:
+    return Image.new("RGB", (w, h), bg)
+
+
+def place_grid(canvas: Image.Image, photo: Image.Image,
+               rows: int, cols: int,
+               start_x: int, start_y: int,
+               gap: int) -> None:
+    """
+    将 photo 按 rows×cols 网格放置到 canvas 上。
+    start_x/start_y 是第一张照片左上角坐标（含描边）。
+    gap 是照片之间的间距（像素）。
+    """
+    pw, ph = photo.size
+    # 如果 photo 是 RGBA，提取 alpha 通道作为 mask
+    if photo.mode == "RGBA":
+        mask = photo.split()[3]
+        photo_rgb = photo.convert("RGB")
+    else:
+        mask = None
+        photo_rgb = photo
+
+    for row in range(rows):
+        for col in range(cols):
+            x = start_x + col * (pw + gap)
+            y = start_y + row * (ph + gap)
+            # 边界检查：防止粘贴超出画布
+            if x < 0 or y < 0 or x + pw > canvas.width or y + ph > canvas.height:
+                continue
+            if mask:
+                canvas.paste(photo_rgb, (x, y), mask)
+            else:
+                canvas.paste(photo_rgb, (x, y))
+
+
+def center_offset(canvas_size: int, content_size: int) -> int:
+    """计算居中偏移量，保证 >= 0"""
+    return max(0, (canvas_size - content_size) // 2)
+
 # ─────────────────────────────────────────────
-# 主排版函数
+# 排版函数
 # ─────────────────────────────────────────────
+def _layout_1inch(img: Image.Image) -> Image.Image:
+    """一寸排版：3列×3行，9张，5寸竖版画布"""
+    cw, ch = CANVAS_SIZES["5寸竖版"]   # 1050×1500
+    pw, ph = PHOTO_SIZES["一寸"]        # 295×413
+    rows, cols = 3, 3
 
-def generate_layout(img: Image.Image, template_name: str) -> Image.Image:
-    """根据模板名称生成排版图片，返回 PIL Image。"""
-    # 关键修复：如果是 RGBA（抠图结果），先合成白色背景转为 RGB，避免 paste 崩溃
-    if img.mode == "RGBA":
-        bg = Image.new("RGB", img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3])
-        img = bg
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
-    if template_name not in TEMPLATES:
-        raise ValueError(f"未知排版类型：{template_name}")
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 307×425
 
-    if template_name == "一寸排版":
-        return _layout_standard(img, "1inch", 3, 3, CANVAS_5INCH_V)
+    total_w = cols * bw + (cols - 1) * GAP   # 3*307 + 2*9 = 939
+    total_h = rows * bh + (rows - 1) * GAP   # 3*425 + 2*9 = 1293
 
-    if template_name == "二寸排版":
-        return _layout_standard(img, "2inch", 2, 2, CANVAS_5INCH_V)
-
-    if template_name == "小二寸排版":
-        return _layout_standard(img, "small2", 2, 2, CANVAS_5INCH_V)
-
-    if template_name == "三寸排版":
-        return _layout_3inch(img)
-
-    if template_name == "驾驶证排版":
-        return _layout_driver(img)
-
-    if template_name == "一寸+二寸排版":
-        return _layout_mixed(img)
-
-    if template_name == "结婚照排版":
-        return _layout_wedding(img)
-
-    raise ValueError(f"未处理的排版类型：{template_name}")
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
+    return canvas
 
 
-def _layout_standard(img: Image.Image, photo_key: str,
-                     cols: int, rows: int,
-                     canvas_size: tuple) -> Image.Image:
-    """标准排版：等比缩放（不裁剪），按网格排列。"""
-    photo_w, photo_h = PHOTO_SIZES[photo_key]
-    photo = fit_photo(img.copy(), photo_w, photo_h)
-    canvas = create_canvas(canvas_size)
-    place_grid(canvas, photo, cols, rows, photo_w, photo_h)
+def _layout_2inch(img: Image.Image) -> Image.Image:
+    """二寸排版：2列×2行，4张，5寸竖版画布"""
+    cw, ch = CANVAS_SIZES["5寸竖版"]   # 1050×1500
+    pw, ph = PHOTO_SIZES["二寸"]        # 413×579
+    rows, cols = 2, 2
+
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 425×591
+
+    total_w = cols * bw + (cols - 1) * GAP   # 2*425 + 9 = 859
+    total_h = rows * bh + (rows - 1) * GAP   # 2*591 + 9 = 1191
+
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
+    return canvas
+
+
+def _layout_small2inch(img: Image.Image) -> Image.Image:
+    """小二寸排版：2列×2行，4张，5寸竖版画布"""
+    cw, ch = CANVAS_SIZES["5寸竖版"]   # 1050×1500
+    pw, ph = PHOTO_SIZES["小二寸"]      # 413×531
+    rows, cols = 2, 2
+
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 425×543
+
+    total_w = cols * bw + (cols - 1) * GAP   # 2*425 + 9 = 859
+    total_h = rows * bh + (rows - 1) * GAP   # 2*543 + 9 = 1095
+
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
     return canvas
 
 
 def _layout_3inch(img: Image.Image) -> Image.Image:
     """
-    三寸排版：
-    - 三寸照片横向（宽9cm×高6cm）
-    - 5寸竖版画布（1050×1500），1列×2行
-    - 等比缩放，不裁剪
+    三寸排版：1列×2行，2张，5寸横版画布（1500×1050）。
+    三寸照片尺寸：826×1063（宽×高）。
+    注意：照片高度 1063 > 画布高度 1050，因此使用 cover 模式裁剪到 826×1021，
+    加描边后 838×1033，两张竖排总高 2075，超过画布，改为横排（2列×1行）。
+    实际布局：2列×1行，横排，画布 1500×1050。
     """
-    photo_w = cm_to_px(9.0)   # 1063px
-    photo_h = cm_to_px(6.0)   # 709px
+    cw, ch = CANVAS_SIZES["5寸横版"]   # 1500×1050
+    # 三寸照片适配画布高度：高度不超过 (ch - 2*GAP - 2*BORDER*2) // 1
+    # 安全尺寸：宽 826，高限制在 ch - 2*BORDER = 1050 - 12 = 1038
+    pw = 826
+    ph = min(1063, ch - BORDER * 2 - 4)   # 1038，防止超出画布
+    rows, cols = 1, 2
 
-    # 如果原图是竖版，旋转为横版（三寸是横向照片）
-    src = img.copy()
-    iw, ih = src.size
-    if ih > iw:
-        src = src.rotate(-90, expand=True)
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 838×(ph+12)
 
-    photo = fit_photo(src, photo_w, photo_h)
-    canvas = create_canvas(CANVAS_5INCH_V)
-    cw, ch = CANVAS_5INCH_V
+    total_w = cols * bw + (cols - 1) * GAP   # 2*838 + 9 = 1685
+    total_h = rows * bh                       # bh
 
-    gap = PHOTO_GAP
-    rows = 2
-    block_h = rows * photo_h + (rows - 1) * gap
-    start_x = (cw - photo_w) // 2
-    start_y = (ch - block_h) // 2
+    # 如果 total_w 超出画布，缩小照片宽度
+    if total_w > cw:
+        # 重新计算照片宽度：(cw - GAP - 2*BORDER*2) // 2
+        pw = (cw - GAP - BORDER * 4) // 2   # (1500 - 9 - 24) // 2 = 733
+        photo = fit_photo(img, pw, ph)
+        photo = add_border(photo, BORDER)
+        bw, bh = photo.size
+        total_w = cols * bw + (cols - 1) * GAP
+        total_h = rows * bh
 
-    for row in range(rows):
-        x = start_x
-        y = start_y + row * (photo_h + gap)
-        p = photo.copy()
-        p = add_border(p)
-        if p.mode != "RGB": p = p.convert("RGB")
-        canvas.paste(p, (x, y))
-
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
     return canvas
 
 
 def _layout_driver(img: Image.Image) -> Image.Image:
-    """
-    驾驶证排版：
-    - 画布：5寸横版（1500×1050 px，5英寸宽×3.5英寸高）
-    - 单张：2.2×3.2 cm（260×378 px）
-    - 排列：5列×2行，共10张，整体居中
-    - 等比缩放，不裁剪
-    """
-    photo_w, photo_h = PHOTO_SIZES["driver"]   # 260×378
-    photo = fit_photo(img.copy(), photo_w, photo_h)
-    canvas = create_canvas(CANVAS_5INCH_H)     # 1500×1050 横版
-    place_grid(canvas, photo, 5, 2, photo_w, photo_h)
+    """驾驶证排版：5列×2行，10张，5寸横版画布"""
+    cw, ch = CANVAS_SIZES["5寸横版"]   # 1500×1050
+    pw, ph = PHOTO_SIZES["驾驶证"]      # 216×280
+    rows, cols = 2, 5
+
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 228×292
+
+    total_w = cols * bw + (cols - 1) * GAP   # 5*228 + 4*9 = 1176
+    total_h = rows * bh + (rows - 1) * GAP   # 2*292 + 9 = 593
+
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
     return canvas
 
 
-def _layout_mixed(img: Image.Image) -> Image.Image:
-    """
-    一寸+二寸混排（7×5英寸画布 2100×1500）：
-    左块：一寸×9（3列×3行）
-    右块：二寸×4（2列×2行）
-    两块整体在画布中居中，块间距8px。
-    等比缩放，不裁剪。
-    """
-    canvas = create_canvas(CANVAS_7INCH)
-    cw, ch = CANVAS_7INCH
+def _layout_1inch_2inch(img: Image.Image) -> Image.Image:
+    """一寸+二寸混排：7寸横版画布，上方4张一寸，下方3张二寸"""
+    cw, ch = CANVAS_SIZES["7寸横版"]   # 2100×1500
 
-    pw1, ph1 = PHOTO_SIZES["1inch"]
-    pw2, ph2 = PHOTO_SIZES["2inch"]
-    photo1 = fit_photo(img.copy(), pw1, ph1)
-    photo2 = fit_photo(img.copy(), pw2, ph2)
+    pw1, ph1 = PHOTO_SIZES["一寸"]     # 295×413
+    pw2, ph2 = PHOTO_SIZES["二寸"]     # 413×579
 
-    gap = PHOTO_GAP
-    sep = 8   # 两块之间的间距
+    p1 = fit_photo(img, pw1, ph1); p1 = add_border(p1, BORDER)
+    p2 = fit_photo(img, pw2, ph2); p2 = add_border(p2, BORDER)
+    bw1, bh1 = p1.size   # 307×425
+    bw2, bh2 = p2.size   # 425×591
 
-    # 左块
-    cols1, rows1 = 3, 3
-    block1_w = cols1 * pw1 + (cols1 - 1) * gap
-    block1_h = rows1 * ph1 + (rows1 - 1) * gap
+    # 上排：4张一寸
+    row1_w = 4 * bw1 + 3 * GAP   # 4*307 + 3*9 = 1255
+    ox1 = center_offset(cw, row1_w)
+    oy1 = center_offset(ch, bh1 + GAP + bh2)
 
-    # 右块
-    cols2, rows2 = 2, 2
-    block2_w = cols2 * pw2 + (cols2 - 1) * gap
-    block2_h = rows2 * ph2 + (rows2 - 1) * gap
+    # 下排：3张二寸
+    row2_w = 3 * bw2 + 2 * GAP   # 3*425 + 2*9 = 1293
+    ox2 = center_offset(cw, row2_w)
+    oy2 = oy1 + bh1 + GAP
 
-    # 整体居中
-    total_w = block1_w + sep + block2_w
-    total_h = max(block1_h, block2_h)
-    origin_x = (cw - total_w) // 2
-    origin_y = (ch - total_h) // 2
-
-    # 左块垂直居中
-    start_x1 = origin_x
-    start_y1 = origin_y + (total_h - block1_h) // 2
-    for row in range(rows1):
-        for col in range(cols1):
-            x = start_x1 + col * (pw1 + gap)
-            y = start_y1 + row * (ph1 + gap)
-            p = photo1.copy()
-            p = add_border(p)
-            if p.mode != "RGB": p = p.convert("RGB")
-            canvas.paste(p, (x, y))
-
-    # 右块垂直居中
-    start_x2 = origin_x + block1_w + sep
-    start_y2 = origin_y + (total_h - block2_h) // 2
-    for row in range(rows2):
-        for col in range(cols2):
-            x = start_x2 + col * (pw2 + gap)
-            y = start_y2 + row * (ph2 + gap)
-            p = photo2.copy()
-            p = add_border(p)
-            if p.mode != "RGB": p = p.convert("RGB")
-            canvas.paste(p, (x, y))
-
+    canvas = create_canvas(cw, ch)
+    place_grid(canvas, p1, 1, 4, ox1, oy1, GAP)
+    place_grid(canvas, p2, 1, 3, ox2, oy2, GAP)
     return canvas
 
 
 def _layout_wedding(img: Image.Image) -> Image.Image:
-    """
-    结婚照排版：
-    - 画布：5寸横版（1500×1050 px，5英寸宽×3.5英寸高）
-    - 单张：横版二寸（5cm×3.5cm → 591×413 px）
-    - 排列：2列×2行，共4张，整体居中
-    - 若原图是竖版，自动旋转为横版
-    """
-    photo_w, photo_h = PHOTO_SIZES["wedding"]   # 591×413
+    """结婚照排版：2列×2行，4张，5寸横版画布"""
+    cw, ch = CANVAS_SIZES["5寸横版"]   # 1500×1050
+    pw, ph = PHOTO_SIZES["结婚照"]      # 413×579
+    rows, cols = 2, 2
 
-    # 自动处理方向：结婚照是横版，若上传的是竖版则旋转
-    src = img.copy()
-    iw, ih = src.size
-    if ih > iw:
-        src = src.rotate(-90, expand=True)
+    photo = fit_photo(img, pw, ph)
+    photo = add_border(photo, BORDER)
+    bw, bh = photo.size   # 425×591
 
-    photo = fit_photo(src, photo_w, photo_h)
-    canvas = create_canvas(CANVAS_5INCH_H)   # 1500×1050 横版
-    place_grid(canvas, photo, 2, 2, photo_w, photo_h)
+    total_w = cols * bw + (cols - 1) * GAP   # 2*425 + 9 = 859
+    total_h = rows * bh + (rows - 1) * GAP   # 2*591 + 9 = 1191
+
+    # 如果总高超过画布，缩小照片
+    if total_h > ch:
+        ph_new = (ch - GAP - BORDER * 4) // 2
+        pw_new = round(pw * ph_new / ph)
+        photo = fit_photo(img, pw_new, ph_new)
+        photo = add_border(photo, BORDER)
+        bw, bh = photo.size
+        total_w = cols * bw + (cols - 1) * GAP
+        total_h = rows * bh + (rows - 1) * GAP
+
+    canvas = create_canvas(cw, ch)
+    ox = center_offset(cw, total_w)
+    oy = center_offset(ch, total_h)
+    place_grid(canvas, photo, rows, cols, ox, oy, GAP)
     return canvas
 
+# ─────────────────────────────────────────────
+# 公开接口
+# ─────────────────────────────────────────────
+_LAYOUT_MAP = {
+    "一寸排版":      _layout_1inch,
+    "二寸排版":      _layout_2inch,
+    "小二寸排版":    _layout_small2inch,
+    "三寸排版":      _layout_3inch,
+    "驾驶证排版":    _layout_driver,
+    "一寸+二寸排版": _layout_1inch_2inch,
+    "结婚照排版":    _layout_wedding,
+}
 
-def save_layout(canvas: Image.Image, output_path: str):
-    """导出排版图片为 JPG，300 DPI。"""
-    canvas.save(output_path, "JPEG", dpi=(DPI, DPI), quality=95)
+
+def generate_layout(img: Image.Image, name: str) -> Image.Image:
+    """
+    生成排版图片。
+    img: 输入图片（PIL Image，可以是 RGB 或 RGBA）
+    name: 排版模板名称
+    返回: 排版后的 RGB 图片（300 DPI 标注）
+    """
+    if img is None:
+        raise ValueError("输入图片为空")
+    if name not in _LAYOUT_MAP:
+        raise ValueError(f"未知排版模板：{name}，可用模板：{list(_LAYOUT_MAP.keys())}")
+
+    # 强制转 RGB（防止 RGBA 图片在 paste 时崩溃）
+    if img.mode == "RGBA":
+        # 合成白色背景
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img.convert("RGB"), mask=img.split()[3])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    result = _LAYOUT_MAP[name](img)
+
+    # 标注 300 DPI
+    result.info["dpi"] = (300, 300)
+    return result
+
+
+def save_layout(img: Image.Image, path: str) -> None:
+    """保存排版图片为 JPEG，300 DPI"""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.save(path, "JPEG", quality=95, dpi=(300, 300))

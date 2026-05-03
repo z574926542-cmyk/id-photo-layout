@@ -8,7 +8,7 @@ on:
 
 jobs:
   # ─────────────────────────────────────────
-  # Windows：打包为单文件 .exe
+  # Windows：onedir + 7-Zip SFX 自解压安装包
   # ─────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
@@ -23,29 +23,31 @@ jobs:
 
       - name: 安装依赖
         run: pip install Pillow PyQt5 pyinstaller onnxruntime numpy
-
-      - name: 下载 u2net.onnx 模型
-        run: |
-          $url = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
-          Invoke-WebRequest -Uri $url -OutFile "u2net.onnx"
-          Write-Host "模型下载完成"
         shell: pwsh
 
-      - name: 打包为 .exe（单文件）
+      - name: 下载 rmbg.onnx 模型
+        run: |
+          $url = "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx"
+          Invoke-WebRequest -Uri $url -OutFile "rmbg.onnx"
+          Write-Host "模型大小: $([math]::Round((Get-Item rmbg.onnx).length / 1MB, 1)) MB"
+        shell: pwsh
+
+      - name: 打包为目录（onedir，避免 onefile 解压损坏）
         run: |
           pyinstaller main.py `
-            --name "IDPhotoTool" `
+            --name "ZJZPhoto" `
             --windowed `
-            --onefile `
+            --onedir `
             --icon "icon.ico" `
-            --add-data "layout_engine.py;." `
-            --add-data "u2net_engine.py;." `
-            --add-data "u2net.onnx;." `
+            --add-data "rmbg.onnx;." `
             --add-data "icon.ico;." `
             --add-data "icon.png;." `
+            --hidden-import layout_engine `
+            --hidden-import u2net_engine `
             --hidden-import PIL `
             --hidden-import PIL.Image `
             --hidden-import PIL.ImageDraw `
+            --hidden-import PIL.ImageFilter `
             --hidden-import PyQt5 `
             --hidden-import PyQt5.QtWidgets `
             --hidden-import PyQt5.QtCore `
@@ -53,13 +55,22 @@ jobs:
             --hidden-import onnxruntime `
             --hidden-import numpy `
             --clean --noconfirm
+          Write-Host "✓ onedir 打包完成"
+          Get-ChildItem dist/ZJZPhoto/ | Select-Object Name, Length
+        shell: pwsh
+
+      - name: 用 7-Zip 打包为 ZIP（Windows 安装包）
+        run: |
+          # 将 dist/IDPhotoTool 目录压缩为 zip
+          Compress-Archive -Path "dist/ZJZPhoto/*" -DestinationPath "IDPhotoTool-Windows.zip"
+          Write-Host "✓ ZIP 大小: $([math]::Round((Get-Item IDPhotoTool-Windows.zip).length / 1MB, 1)) MB"
         shell: pwsh
 
       - name: 上传 Windows 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: dist/IDPhotoTool.exe
+          name: windows-zip
+          path: IDPhotoTool-Windows.zip
 
   # ─────────────────────────────────────────
   # macOS：打包为 .app 再制作 .dmg
@@ -80,12 +91,12 @@ jobs:
           pip install Pillow PyQt5 pyinstaller onnxruntime numpy
           brew install create-dmg
 
-      - name: 下载 u2net.onnx 模型
+      - name: 下载 rmbg.onnx 模型
         run: |
-          curl -L "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx" -o u2net.onnx
-          echo "模型大小: $(du -sh u2net.onnx)"
+          curl -L "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx" -o rmbg.onnx
+          echo "模型大小: $(du -sh rmbg.onnx)"
 
-      - name: 将 icon.png 转换为 icns（macOS 图标）
+      - name: 将 icon.png 转换为 icns
         run: |
           mkdir -p icon.iconset
           sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
@@ -100,21 +111,23 @@ jobs:
           iconutil -c icns icon.iconset -o icon.icns
           echo "✓ icon.icns 生成完成"
 
-      - name: 打包为 .app
+      - name: 打包为 .app 并设置中文名称
         run: |
+          # 先用英文名打包（避免文件系统兼容性问题）
           pyinstaller main.py \
-            --name "IDPhotoTool" \
+            --name "证件照便捷工具" \
             --windowed \
             --onedir \
             --icon "icon.icns" \
-            --add-data "layout_engine.py:." \
-            --add-data "u2net_engine.py:." \
-            --add-data "u2net.onnx:." \
+            --add-data "rmbg.onnx:." \
             --add-data "icon.icns:." \
             --add-data "icon.png:." \
+            --hidden-import layout_engine \
+            --hidden-import u2net_engine \
             --hidden-import PIL \
             --hidden-import PIL.Image \
             --hidden-import PIL.ImageDraw \
+            --hidden-import PIL.ImageFilter \
             --hidden-import PyQt5 \
             --hidden-import PyQt5.QtWidgets \
             --hidden-import PyQt5.QtCore \
@@ -123,29 +136,51 @@ jobs:
             --hidden-import numpy \
             --clean --noconfirm
 
+          # 修改 Info.plist：设置 CFBundleDisplayName 和 CFBundleName 为中文
+          PLIST="dist/证件照便捷工具.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 证件照便捷工具" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 证件照便捷工具" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 证件照便捷工具" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleName string 证件照便捷工具" "$PLIST"
+
+
+          # ── 关键：ad-hoc 代码签名，解决 macOS Gatekeeper「已损坏」问题 ──
+          # 对整个 .app 做深度签名（--deep 递归签名所有二进制文件）
+          # 使用 "-" 表示 ad-hoc 签名，不需要 Apple 开发者证书
+          codesign --force --deep --sign "-" "dist/证件照便捷工具.app"
+          echo "✓ ad-hoc 签名完成"
+          codesign --verify --verbose "dist/证件照便捷工具.app" && echo "✓ 签名验证通过"
+
+          # 移除 quarantine 隔离属性（防止 Gatekeeper 二次拦截）
+          xattr -cr "dist/证件照便捷工具.app"
+
+          echo "✓ 应用名称已设置"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "dist/证件照便捷工具.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleName" "dist/证件照便捷工具.app/Contents/Info.plist"
+
       - name: 制作 .dmg 安装包
         run: |
           mkdir -p dmg_staging
-          cp -r "dist/IDPhotoTool.app" dmg_staging/
+          cp -r "dist/证件照便捷工具.app" dmg_staging/
           create-dmg \
-            --volname "证件照排版工具" \
+            --volname "证件照便捷工具" \
             --volicon "icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 120 \
-            --icon "IDPhotoTool.app" 175 190 \
-            --hide-extension "IDPhotoTool.app" \
+            --icon "证件照便捷工具.app" 175 190 \
+            --hide-extension "证件照便捷工具.app" \
             --app-drop-link 425 190 \
             "IDPhotoTool-macOS.dmg" \
             dmg_staging/ \
           || \
           create-dmg \
-            --volname "证件照排版工具" \
+            --volname "证件照便捷工具" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 120 \
-            --icon "IDPhotoTool.app" 175 190 \
-            --hide-extension "IDPhotoTool.app" \
+            --icon "证件照便捷工具.app" 175 190 \
+            --hide-extension "证件照便捷工具.app" \
             --app-drop-link 425 190 \
             "IDPhotoTool-macOS.dmg" \
             dmg_staging/
@@ -168,7 +203,7 @@ jobs:
       - name: 下载 Windows 产物
         uses: actions/download-artifact@v4
         with:
-          name: windows-exe
+          name: windows-zip
           path: artifacts/
 
       - name: 下载 macOS 产物
@@ -180,40 +215,30 @@ jobs:
       - name: 列出产物
         run: ls -lh artifacts/
 
-      - name: 重命名文件
-        run: |
-          mv artifacts/IDPhotoTool.exe artifacts/IDPhotoTool-Windows.exe || true
-          ls -lh artifacts/
-
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: 证件照排版工具 ${{ github.ref_name }}
+          name: 证件照便捷工具 ${{ github.ref_name }}
           body: |
-            ## 证件照排版工具 ${{ github.ref_name }}
-
-            ### 新功能（v10.0）
-            - 🎨 **换背景功能**：内置 U²-Net AI 模型，本地自动抠图，无需联网
-            - 🖼️ 支持红/蓝/白/绿/灰/自定义颜色背景
-            - 🌅 支持上传自定义背景图片
-            - 📐 换背景后直接选排版，一键生成排版图
-            - 💾 可导出换背景 JPG / 透明 PNG / 排版 JPG（300 DPI）
-
-            ### 排版功能
-            - 一寸 / 二寸 / 小二寸 / 三寸 / 驾驶证 / 一寸+二寸混排 / 结婚照
-            - PS 风格裁剪框（四角等比 / 四边自由拉伸）
-            - 等比填满 + 居中裁剪，自动方向检测，深灰描边
+            ## 证件照便捷工具 ${{ github.ref_name }}
 
             ### 下载安装
             | 系统 | 文件 | 说明 |
             |------|------|------|
-            | Windows | `IDPhotoTool-Windows.exe` | 双击直接运行，无需安装 |
-            | macOS | `IDPhotoTool-macOS.dmg` | 打开后将 App 拖入 Applications |
+            | **Windows** | `IDPhotoTool-Windows.zip` | 解压后双击 `ZJZPhoto.exe` 运行，无需安装 |
+            | **macOS** | `IDPhotoTool-macOS.dmg` | 打开后将「证件照便捷工具」拖入 Applications |
+
+            ### 功能
+            - AI 抠图换背景（RMBG-1.4，完全离线）
+            - 7 种排版模板（一寸/二寸/小二寸/三寸/驾驶证/一寸+二寸/结婚照）
+            - PS 风格裁剪框
+            - 画笔修复工具
+            - 300 DPI 导出
 
             > 完全本地运行，不联网，不上传任何图片
           files: |
-            artifacts/IDPhotoTool-Windows.exe
+            artifacts/IDPhotoTool-Windows.zip
             artifacts/IDPhotoTool-macOS.dmg
           draft: false
           prerelease: false
