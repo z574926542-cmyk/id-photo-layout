@@ -1,5 +1,5 @@
 """
-证件照便捷工具 v12.0
+证件照便捷工具 v14.0
 功能：AI抠图换背景 + 多规格排版 + 画笔修复 + PS风格裁剪框 + JPG导出
 """
 from __future__ import annotations
@@ -17,17 +17,8 @@ from PyQt5.QtWidgets import (
     QProgressBar, QSlider, QColorDialog, QFrame,
 )
 from PIL import Image
-
-# ─────────────────────────────────────────────
-# 延迟导入
-# ─────────────────────────────────────────────
-def generate_layout(img: Image.Image, name: str) -> Image.Image:
-    from layout_engine import generate_layout as _gl
-    return _gl(img, name)
-
-def save_layout(img: Image.Image, path: str):
-    from layout_engine import save_layout as _sl
-    _sl(img, path)
+from layout_engine import generate_layout, save_layout
+from u2net_engine import remove_background as _rmbg_remove_background
 
 # ─────────────────────────────────────────────
 # 颜色主题
@@ -440,8 +431,7 @@ class RemoveBgWorker(QThread):
     def __init__(self,img): super().__init__(); self._img=img
     def run(self):
         try:
-            from u2net_engine import remove_background
-            self.done.emit(remove_background(self._img))
+            self.done.emit(_rmbg_remove_background(self._img))
         except Exception as e: self.fail.emit(str(e))
 
 class LayoutWorker(QThread):
