@@ -250,11 +250,22 @@ class CropDialog(QDialog):
         vl = QVBoxLayout(self)
         self._canvas = CropCanvas(pil_img)
         vl.addWidget(self._canvas)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Reset |
-                                QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox()
+        btn_ok     = btns.addButton("确认裁剪", QDialogButtonBox.AcceptRole)
+        btn_reset  = btns.addButton("重置",     QDialogButtonBox.ResetRole)
+        btn_cancel = btns.addButton("取消",     QDialogButtonBox.RejectRole)
+        btn_ok.setStyleSheet(
+            f"background:{C['accent']};color:#fff;border:none;border-radius:6px;"
+            f"padding:6px 18px;font-size:12px;font-weight:500;")
+        btn_reset.setStyleSheet(
+            f"background:{C['card']};color:{C['text']};border:1px solid {C['border']};"
+            f"border-radius:6px;padding:6px 18px;font-size:12px;")
+        btn_cancel.setStyleSheet(
+            f"background:{C['card']};color:{C['text2']};border:1px solid {C['border']};"
+            f"border-radius:6px;padding:6px 18px;font-size:12px;")
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        btns.button(QDialogButtonBox.Reset).clicked.connect(self._canvas.reset)
+        btn_reset.clicked.connect(self._canvas.reset)
         vl.addWidget(btns)
 
     def get_result(self) -> Image.Image:
