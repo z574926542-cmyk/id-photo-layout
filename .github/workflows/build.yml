@@ -124,6 +124,9 @@ jobs:
             --add-data "icon.png:." \
             --hidden-import layout_engine \
             --hidden-import u2net_engine \
+            --hidden-import utils \
+            --hidden-import module_id_photo \
+            --hidden-import module_perspective \
             --hidden-import PIL \
             --hidden-import PIL.Image \
             --hidden-import PIL.ImageDraw \
