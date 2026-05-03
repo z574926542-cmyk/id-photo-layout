@@ -102,8 +102,13 @@ def main():
     palette.setColor(QPalette.HighlightedText, QColor('#ffffff'))
     app.setPalette(palette)
 
-    font = QFont("PingFang SC", 11)
-    font.setFallbackFamilies(["Microsoft YaHei", "Helvetica Neue", "Arial"])
+    # 兼容旧版 PyQt5（setFallbackFamilies 需要 Qt 5.13+）
+    if sys.platform == 'darwin':
+        font = QFont("PingFang SC", 11)
+    else:
+        font = QFont("Microsoft YaHei", 11)
+    if hasattr(font, 'setFallbackFamilies'):
+        font.setFallbackFamilies(["Microsoft YaHei", "Helvetica Neue", "Arial"])
     app.setFont(font)
 
     win = MainWindow()
