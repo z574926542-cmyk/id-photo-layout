@@ -28,22 +28,29 @@ jobs:
       - name: 下载 modnet.onnx 模型
         run: |
           $urls = @(
-            "https://github.com/ZHKKKe/MODNet/releases/download/v1.0/modnet_photographic_portrait_matting.onnx",
-            "https://huggingface.co/onnx-community/modnet-webnn/resolve/main/onnx/model.onnx"
+            "https://huggingface.co/facefusion/models-3.5.0/resolve/main/modnet.onnx",
+            "https://huggingface.co/onnx-community/modnet-webnn/resolve/main/onnx/model.onnx",
+            "https://huggingface.co/TheEeeeLin/HivisionIDPhotos_matting/resolve/main/modnet_photographic_portrait_matting.onnx"
           )
           $ok = $false
           foreach ($url in $urls) {
             try {
               Write-Host "尝试下载: $url"
-              Invoke-WebRequest -Uri $url -OutFile "modnet.onnx" -TimeoutSec 180
+              Invoke-WebRequest -Uri $url -OutFile "modnet.onnx" -TimeoutSec 300
+              $sizeMB = [math]::Round((Get-Item modnet.onnx).length / 1MB, 1)
+              Write-Host "下载完成，大小: $sizeMB MB"
+              if ($sizeMB -lt 20) {
+                Write-Host "文件过小（$sizeMB MB），可能不完整，尝试下一个..."
+                continue
+              }
               $ok = $true
               break
             } catch {
               Write-Host "失败，尝试下一个..."
             }
           }
-          if (-not $ok) { throw "所有下载地址均失败" }
-          Write-Host "模型大小: $([math]::Round((Get-Item modnet.onnx).length / 1MB, 1)) MB"
+          if (-not $ok) { throw "所有下载地址均失败或文件不完整" }
+          Write-Host "✓ 模型大小: $([math]::Round((Get-Item modnet.onnx).length / 1MB, 1)) MB"
         shell: pwsh
 
       - name: 打包为目录（onedir）
@@ -108,13 +115,26 @@ jobs:
 
       - name: 下载 modnet.onnx 模型
         run: |
-          curl -L --retry 3 --retry-delay 5 \
-            "https://github.com/ZHKKKe/MODNet/releases/download/v1.0/modnet_photographic_portrait_matting.onnx" \
-            -o modnet.onnx 2>/dev/null \
-          || curl -L --retry 3 --retry-delay 5 \
-            "https://huggingface.co/onnx-community/modnet-webnn/resolve/main/onnx/model.onnx" \
-            -o modnet.onnx
-          echo "模型大小: $(du -sh modnet.onnx)"
+          download_and_verify() {
+            local url=$1
+            echo "尝试下载: $url"
+            curl -L --retry 3 --retry-delay 5 --max-time 300 "$url" -o modnet.onnx
+            local size=$(stat -f%z modnet.onnx 2>/dev/null || echo 0)
+            echo "下载完成，大小: $size bytes"
+            if [ "$size" -gt 20000000 ]; then
+              echo "✓ 模型文件验证通过: $(du -sh modnet.onnx)"
+              return 0
+            else
+              echo "文件过小（$size bytes），可能不完整"
+              rm -f modnet.onnx
+              return 1
+            fi
+          }
+          download_and_verify "https://huggingface.co/facefusion/models-3.5.0/resolve/main/modnet.onnx" \
+          || download_and_verify "https://huggingface.co/onnx-community/modnet-webnn/resolve/main/onnx/model.onnx" \
+          || download_and_verify "https://huggingface.co/TheEeeeLin/HivisionIDPhotos_matting/resolve/main/modnet_photographic_portrait_matting.onnx" \
+          || { echo "所有下载地址均失败"; exit 1; }
+          echo "最终模型大小: $(du -sh modnet.onnx)"
 
       - name: 将 icon.png 转换为 icns
         run: |
